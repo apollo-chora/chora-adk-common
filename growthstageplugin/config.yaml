@@ -1,0 +1,102 @@
+# Familiar Growth Stage capability gating (ADR-149 §"The 7 stages").
+#
+# This file is the canonical source for stage-by-stage tool + memory-mode
+# gating. Loaded at process start by `Default()` in plugin.go via go:embed.
+# Operators can patch this file without touching plugin code — feedback
+# `feedback_no_inline_config` rule for growth-stage capability gates.
+#
+# `allowed_tools` is monotonic (stage N is a superset of stage N-1). Drift
+# from monotonicity = ADR-149 violation, caught by plugin_test.go.
+#
+# Memory modes mirror ADR-149 §"The 7 stages":
+#   stateless         | no memory at all (Egg)
+#   rolling-N         | last N user turns only
+#   rolling-21-rag    | 21-turn rolling + persistent episodic RAG
+#   vector-rag-all    | full vector RAG over all prior sessions
+#   full-procedural   | full episodic + semantic + procedural memory
+
+# `unshipped_tools` (ADR-249 A1a, owner-ruled 2026-08-07): ladder names the
+# stage table grants whose backing agent tools do NOT ship. The ladder keeps
+# them as product design; the runtime `growth.allowed_tools` write filters
+# them out, so the agent never advertises a tool that cannot execute.
+# Delivery returns via the ADR-249 Option B consumption-mediated callback or
+# an equippable catalogue Skill; remove a name here in the SAME change that
+# ships its tool. Every stage tool name must be either mapped in
+# LadderToRegistryKey (plugin.go) or listed here; Default() refuses the
+# config otherwise.
+unshipped_tools:
+  - atom_search
+  - ebbinghaus_state
+  - persona_lookup
+  - score_atom_for_learner
+
+stages:
+  # --- stage 0: Egg (pre-paywall, no real conversation) ---
+  - stage: 0
+    name: egg
+    allowed_tools: []
+    memory_mode: stateless
+
+  # --- stage 1: Baby (post-hatch, single citation) ---
+  - stage: 1
+    name: baby
+    allowed_tools:
+      - cite_atom
+    memory_mode: rolling-1
+
+  # --- stage 2: Fledgling (+ atom_search) ---
+  - stage: 2
+    name: fledgling
+    allowed_tools:
+      - cite_atom
+      - atom_search
+    memory_mode: rolling-3
+
+  # --- stage 3: Awakened (+ ebbinghaus_state + 24h Aha-moment preview) ---
+  - stage: 3
+    name: awakened
+    allowed_tools:
+      - cite_atom
+      - atom_search
+      - ebbinghaus_state
+    memory_mode: rolling-7
+
+  # --- stage 4: Structural (+ persona_lookup + score_atom_for_learner) ---
+  # The innate kit PLATEAUS here (ADR-218 D1): stages 5-6 add NO new innate
+  # tools — every higher-order power is an equippable catalogue Skill.
+  - stage: 4
+    name: structural
+    allowed_tools:
+      - cite_atom
+      - atom_search
+      - ebbinghaus_state
+      - persona_lookup
+      - score_atom_for_learner
+    memory_mode: rolling-21-rag
+
+  # --- stage 5: Teen (deeper memory only; no new innate tools) ---
+  # RETIRED from the innate kit by ADR-218: query_kg → map_sight (kg.read_map
+  # Skill). The gain at this stage is memory reach (vector-rag-all), not tools.
+  - stage: 5
+    name: teen
+    allowed_tools:
+      - cite_atom
+      - atom_search
+      - ebbinghaus_state
+      - persona_lookup
+      - score_atom_for_learner
+    memory_mode: vector-rag-all
+
+  # --- stage 6: Matured (full procedural memory; no new innate tools) ---
+  # RETIRED from the innate kit by ADR-218: suggest_atom_authoring → atom_forge
+  # Skill; propose_kg_merge → fog_scout's st6 extension. Both are now equippable
+  # catalogue Skills occupying slots, not innate meta-tools.
+  - stage: 6
+    name: matured
+    allowed_tools:
+      - cite_atom
+      - atom_search
+      - ebbinghaus_state
+      - persona_lookup
+      - score_atom_for_learner
+    memory_mode: full-procedural
