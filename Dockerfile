@@ -25,6 +25,7 @@ FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS builder
 ARG LIBRARY_NAME
 ARG GIT_SHA
 ARG BUILD_TIME
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -36,7 +37,7 @@ RUN go mod download
 
 ENV CGO_ENABLED=0 \
     GOOS=linux \
-    GOARCH=amd64
+    GOARCH=${TARGETARCH}
 
 # Build every package and run the suite. A library image that ships with a
 # failing test is worse than no image: the failure would surface only in a
