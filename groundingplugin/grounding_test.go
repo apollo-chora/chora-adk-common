@@ -135,3 +135,44 @@ func TestNew_BuildsPlugin(t *testing.T) {
 		t.Fatal("New returned nil plugin")
 	}
 }
+
+func TestApplyGrounding_AttachesEveryEntryOfTheMultiFileList(t *testing.T) {
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Generate MCQs."}}}},
+	}
+	state := fakeState{
+		"source_files_json": `[{"blob_uri":"s3://b/job/source","mime_type":"application/pdf","role":"source"},` +
+			`{"blob_uri":"s3://b/job/rubric","mime_type":"text/markdown","role":"rubric"}]`,
+	}
+
+	applyGroundingFromState(state, req)
+
+	parts := req.Contents[0].Parts
+	if len(parts) != 3 {
+		t.Fatalf("parts = %d; want 3 (text + 2 fileData)", len(parts))
+	}
+	if got := parts[1].FileData.FileURI; got != "s3://b/job/source" {
+		t.Errorf("first file = %q; want s3://b/job/source", got)
+	}
+	if got := parts[2].FileData.FileURI; got != "s3://b/job/rubric" {
+		t.Errorf("second file = %q; want s3://b/job/rubric", got)
+	}
+}
+
+func TestApplyGrounding_MalformedFileListFallsBackToTheSingleBlob(t *testing.T) {
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Generate MCQs."}}}},
+	}
+	state := fakeState{
+		"source_files_json": "not json",
+		"source_blob_uri":   "s3://b/job/source",
+		"source_mime_type":  "application/pdf",
+	}
+
+	applyGroundingFromState(state, req)
+
+	parts := req.Contents[0].Parts
+	if len(parts) != 2 || parts[1].FileData == nil || parts[1].FileData.FileURI != "s3://b/job/source" {
+		t.Fatalf("malformed list must fall back to the single blob; parts = %+v", parts)
+	}
+}

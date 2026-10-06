@@ -16,6 +16,7 @@
 package groundingplugin
 
 import (
+	"encoding/json"
 	"strings"
 
 	"google.golang.org/adk/agent"
@@ -27,9 +28,18 @@ import (
 // Session-state keys the orchestrator threads (generate_node →
 // _build_session_state). Match the chora-contracts batch field names.
 const (
-	stateKeySourceBlobURI  = "source_blob_uri"
-	stateKeySourceMimeType = "source_mime_type"
+	stateKeySourceBlobURI   = "source_blob_uri"
+	stateKeySourceMimeType  = "source_mime_type"
+	stateKeySourceFilesJSON = "source_files_json"
 )
+
+// sourceFile is one entry of the role-tagged effective file list the
+// orchestrator forwards for a multi-file (or rubric-bearing) grounded batch.
+type sourceFile struct {
+	BlobURI  string `json:"blob_uri"`
+	MimeType string `json:"mime_type"`
+	Role     string `json:"role"`
+}
 
 // stateReader is the minimal session-state read surface (matches
 // session.ReadonlyState / session.State Get). Mirrors manaplugin.getStateString.
@@ -55,27 +65,52 @@ func applyGroundingFromState(state stateReader, req *adkmodel.LLMRequest) {
 	if req == nil {
 		return
 	}
-	blobURI := strings.TrimSpace(readState(state, stateKeySourceBlobURI))
-	if blobURI == "" {
-		return // no grounding material — single + non-grounded paths unchanged
+	// Lane 1c multi-file grounding: the orchestrator forwards the EFFECTIVE
+	// role-tagged file list for a grounded batch (multi-file uploads, or a
+	// single upload plus a rubric). Attach every entry — this is the seam the
+	// orchestrator's qgen_crew.py comments describe as pending.
+	var parts []*genai.Part
+	if raw := strings.TrimSpace(readState(state, stateKeySourceFilesJSON)); raw != "" {
+		var files []sourceFile
+		if err := json.Unmarshal([]byte(raw), &files); err == nil {
+			for _, f := range files {
+				uri := strings.TrimSpace(f.BlobURI)
+				if uri == "" {
+					continue
+				}
+				parts = append(parts, &genai.Part{
+					FileData: &genai.FileData{FileURI: uri, MIMEType: strings.TrimSpace(f.MimeType)},
+				})
+			}
+		}
 	}
-	mime := strings.TrimSpace(readState(state, stateKeySourceMimeType))
-	part := &genai.Part{FileData: &genai.FileData{FileURI: blobURI, MIMEType: mime}}
+	if len(parts) == 0 {
+		blobURI := strings.TrimSpace(readState(state, stateKeySourceBlobURI))
+		if blobURI == "" {
+			return // no grounding material — single + non-grounded paths unchanged
+		}
+		parts = append(parts, &genai.Part{
+			FileData: &genai.FileData{
+				FileURI:  blobURI,
+				MIMEType: strings.TrimSpace(readState(state, stateKeySourceMimeType)),
+			},
+		})
+	}
 
-	// Append to the LAST user content (the turn-initiating message) so the blob
-	// rides with the user's instruction. If there is no user content (defensive)
-	// append a fresh user content carrying the part.
+	// Append to the LAST user content (the turn-initiating message) so the
+	// material rides with the user's instruction. If there is no user content
+	// (defensive) append a fresh user content carrying the parts.
 	for i := len(req.Contents) - 1; i >= 0; i-- {
 		c := req.Contents[i]
 		if c == nil {
 			continue
 		}
 		if c.Role == "user" || c.Role == "" {
-			c.Parts = append(c.Parts, part)
+			c.Parts = append(c.Parts, parts...)
 			return
 		}
 	}
-	req.Contents = append(req.Contents, &genai.Content{Role: "user", Parts: []*genai.Part{part}})
+	req.Contents = append(req.Contents, &genai.Content{Role: "user", Parts: parts})
 }
 
 // New returns an ADK plugin whose BeforeModelCallback injects the batch source
