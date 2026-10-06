@@ -184,6 +184,9 @@ func New(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	if cfg.CallTimeout == 0 {
 		cfg.CallTimeout = 90 * time.Second
 	}
+	if !cfg.Insecure && envFlag(EnvGatewayInsecure) {
+		cfg.Insecure = true
+	}
 
 	conn, err := dialGateway(ctx, cfg)
 	if err != nil {
@@ -238,6 +241,21 @@ func dialGateway(ctx context.Context, cfg Config) (*grpc.ClientConn, error) {
 // an authenticating proxy read the token from the environment (never inline,
 // per feedback_no_inline_config).
 const EnvGatewayToken = "CHORA_GATEWAY_TOKEN"
+
+// EnvGatewayInsecure names the env var that switches the dial to plaintext
+// gRPC for a local (compose) gateway — the value the Insecure field documents.
+// Any truthy value ("1", "true", "yes", "on") enables it; it is opt-in and
+// never defaulted on, so production still requires TLS + CHORA_GATEWAY_TOKEN.
+const EnvGatewayInsecure = "CHORA_GATEWAY_INSECURE"
+
+// envFlag reports whether the named env var holds a truthy value.
+func envFlag(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
 
 // staticTokenSource is an oauth2.TokenSource over a fixed bearer token.
 type staticTokenSource struct{ token string }
