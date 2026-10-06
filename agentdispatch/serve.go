@@ -138,7 +138,7 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 	log.Info("agentdispatch.serving",
 		"role", cfg.AgentRole, "bus", url, "subscription", subscription)
 
-	return bus.Subscribe(ctx, eventbus.ConsumerConfig{
+	if err := bus.Subscribe(ctx, eventbus.ConsumerConfig{
 		Name:       subscription,
 		Subject:    RequestTopic(cfg.AgentRole),
 		MaxDeliver: maxDeliveryAttemptsFromEnv(log),
@@ -155,7 +155,17 @@ func Serve(ctx context.Context, cfg ServeConfig) error {
 		default:
 			return errNacked
 		}
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Subscribe starts the consume loop asynchronously and returns at once, so
+	// this function must not return yet: the deferred bus.Close() above would
+	// tear the connection down the instant the subscription came up, leaving a
+	// consumer that exists on the broker but never pulls (no deliveries, no
+	// errors, no log line). Block until the process is asked to stop.
+	<-ctx.Done()
+	return nil
 }
 
 // errNacked is the redelivery signal the subscribe wrapper returns when the
