@@ -122,6 +122,11 @@ func RunSubscriberOnly(ctx context.Context, cfg ServeConfig, opts RunOptions) er
 		if err != nil {
 			return describeSubscriberError(cfg.AgentRole, url, subscription, err)
 		}
+		// The bus subscribes asynchronously, so a nil return means the receive
+		// loop is now running — not that the agent finished its work. Block
+		// until the process is asked to stop; returning here would exit the
+		// container immediately and restart it in a tight loop.
+		<-ctx.Done()
 		return nil
 	case err := <-healthErr:
 		// The probe server died underneath a live subscriber. Stop consuming

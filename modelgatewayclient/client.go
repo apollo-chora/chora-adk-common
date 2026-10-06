@@ -210,7 +210,7 @@ func dialGateway(ctx context.Context, cfg Config) (*grpc.ClientConn, error) {
 	dialOpts := []grpc.DialOption{
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	}
-	if cfg.Insecure {
+	if cfg.Insecure || (len(cfg.dialOptsExtra) == 0 && envFlag(EnvGatewayInsecure)) {
 		// LOCAL DEV ONLY — plaintext gRPC to a local gateway (no TLS,
 		// no token). Set via CHORA_GATEWAY_INSECURE=1 env var.
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
