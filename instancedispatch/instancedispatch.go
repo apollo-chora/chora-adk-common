@@ -200,13 +200,6 @@ func WithInstanceID(ctx context.Context, instanceID string) context.Context {
 	return ctx
 }
 
-// InstanceIDFromContext returns the discriminator stamped by WithInstanceID
-// (via ResolveInstanceFromState), or "".
-func InstanceIDFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKeyInstanceID).(string)
-	return v
-}
-
 // TenantIDFromContext returns the tenant_id stamped by WithRequestIdentity, or "".
 func TenantIDFromContext(ctx context.Context) string {
 	v, _ := ctx.Value(ctxKeyTenantID).(string)

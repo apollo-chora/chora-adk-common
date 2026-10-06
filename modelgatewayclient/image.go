@@ -113,14 +113,6 @@ func validateConfig(cfg *Config) error {
 	return nil
 }
 
-// Close releases the connection.
-func (i *ImageInvoker) Close() error {
-	if i.conn == nil {
-		return nil
-	}
-	return i.conn.Close()
-}
-
 // ImageRequest is one image-modality Invoke.
 type ImageRequest struct {
 	// TenantID / GCID are the REQUESTING tenant and learner (the dispatch

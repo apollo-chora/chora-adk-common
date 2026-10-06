@@ -85,27 +85,6 @@ func TerminalText(events []*session.Event, terminalAuthor string) (string, error
 	return terminal, nil
 }
 
-// RunnerAgentRun builds the AgentRun that executes the dispatched work
-// IN-PROCESS through the ADK runner.
-//
-// This is the native subscriber ADR-253 D7 rules for: the same root agent and
-// the same plugin chain the HTTP launcher serves, reached without an HTTP hop,
-// rather than a shim that posts to the agent's own local surface.
-//
-// Each dispatch gets its OWN session, keyed on the execution id, matching the
-// HTTP path's create-session-then-query-then-discard shape. The OE crews are
-// stateless single-turn per dispatch, so nothing carries between them, and a
-// per-dispatch session means a redelivery cannot inherit a half-finished
-// conversation.
-//
-// The session service is passed alongside the runner rather than read from it:
-// runner.Runner keeps its session service unexported, and the caller builds
-// both from the same launcher config anyway. They MUST be the same instance —
-// a runner looking at a different store would find no session and no state.
-func RunnerAgentRun(r *runner.Runner, sessions session.Service, appName string) AgentRun {
-	return RunnerAgentRunWithPolicy(r, sessions, appName, RunPolicy{})
-}
-
 // RunPolicy is the per-role session and user-message policy (see
 // ServeConfig.SessionKey / UserMessage). The zero value is the stateless
 // per-dispatch policy every crew ran on before companion_chat.
@@ -114,7 +93,16 @@ type RunPolicy struct {
 	UserMessage func(req Request) string
 }
 
-// RunnerAgentRunWithPolicy is RunnerAgentRun with a RunPolicy.
+// RunnerAgentRunWithPolicy builds the AgentRun that executes the dispatched
+// work IN-PROCESS through the ADK runner, under a per-role RunPolicy. This is
+// the native subscriber ADR-253 D7 rules for: the same root agent and the same
+// plugin chain the HTTP launcher serves, reached without an HTTP hop, rather
+// than a shim that posts to the agent's own local surface.
+//
+// The session service is passed alongside the runner rather than read from it:
+// runner.Runner keeps its session service unexported, and the caller builds
+// both from the same launcher config anyway. They MUST be the same instance —
+// a runner looking at a different store would find no session and no state.
 //
 // Stateless roles get a fresh per-dispatch session and the user message is
 // handed to the runner, which appends it. A conversational role (persistent

@@ -110,10 +110,6 @@ func mustNewClient(t *testing.T, fake *fakeServer, override func(*Config)) adkmo
 	return llm
 }
 
-func noopUnary(ctx context.Context, method string, req, reply any, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	return invoker(ctx, method, req, reply, cc, opts...)
-}
-
 // TestGenerateContent_PropagatesActiveSpanTraceparent guards the agent->gateway
 // trace-correlation fix (HANDOFF_OBSERVABILITY_OUTBOX_JAM_2026-05-29 trace wave).
 // An ADK agent calling the gateway has NO inbound gRPC metadata; its trace

@@ -14,7 +14,7 @@ import (
 // more times through the backoff ladder while the parked run hears nothing.
 //
 // Agents return it for a permanent fault they can name (an unknown payload
-// discriminator, a missing required input), and RunnerAgentRun derives it from
+// discriminator, a missing required input), and classifyRunError derives it from
 // the gateway's FAILED_PRECONDITION answers (surface_unstamped,
 // companion_suspended) and INVALID_ARGUMENT; UNAVAILABLE (for instance
 // suspension_unreadable) and every other code stay retryable.
