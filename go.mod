@@ -4,7 +4,7 @@ go 1.26.6
 
 require (
 	github.com/apollo-chora/chora-common v0.0.0-20261005042719-5373c91ce52b
-	github.com/apollo-chora/chora-contracts/gen/go v0.0.0-20261005030823-832afca4af5b
+	github.com/google/uuid v1.6.0
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.68.0
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/sdk v1.44.0
@@ -29,7 +29,6 @@ require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/safehtml v0.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.18.0 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect

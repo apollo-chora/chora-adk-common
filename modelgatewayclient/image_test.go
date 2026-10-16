@@ -11,16 +11,17 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
-	mgv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1"
+	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 )
 
 type scriptedImageRPC struct {
-	answers []func() (*mgv1.InvokeResponse, error)
-	reqs    []*mgv1.InvokeRequest
+	answers []func() (*gatewayv1.InvokeResponse, error)
+	reqs    []*gatewayv1.InvokeRequest
 }
 
-func (s *scriptedImageRPC) Invoke(_ context.Context, in *mgv1.InvokeRequest, _ ...grpc.CallOption) (*mgv1.InvokeResponse, error) {
+func (s *scriptedImageRPC) Invoke(_ context.Context, in *gatewayv1.InvokeRequest, _ ...grpc.CallOption) (*gatewayv1.InvokeResponse, error) {
 	s.reqs = append(s.reqs, in)
 	if len(s.answers) == 0 {
 		return nil, status.Error(codes.Internal, "no scripted answer")
@@ -42,9 +43,20 @@ func newTestInvoker(rpc imageRPC) *ImageInvoker {
 }
 
 func TestImageInvoker_stampsIdentityAndReturnsBytes(t *testing.T) {
-	rpc := &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){
-		func() (*mgv1.InvokeResponse, error) {
-			return &mgv1.InvokeResponse{ImageBytes: []byte{1, 2, 3}, ImageMimeType: "image/png", ModelVersion: "gemini-3-pro-image-001"}, nil
+	rpc := &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
+		func() (*gatewayv1.InvokeResponse, error) {
+			return &gatewayv1.InvokeResponse{
+				UpstreamModel: "gemini-3-pro-image-001",
+				FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
+				Output: []*gatewayv1.OutputItem{{
+					Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+						Part: &gatewayv1.ContentPart_Image{Image: &gatewayv1.ImagePart{
+							Source:    &gatewayv1.ImagePart_Data{Data: "AQID"}, // base64 of {1,2,3}
+							MediaType: "image/png",
+						}},
+					}},
+				}},
+			}, nil
 		},
 	}}
 	inv := newTestInvoker(rpc)
@@ -53,44 +65,76 @@ func TestImageInvoker_stampsIdentityAndReturnsBytes(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", res, err)
 	}
 	req := rpc.reqs[0]
-	if req.TenantId != "t1" || req.Gcid != "g1" || req.AgentId != "qgen_renderer" || req.Surface != "qgen" || req.CrewKind != "qgen" ||
-		req.ResponseModality != ResponseModalityImage || req.LogicalModelId != "gemini-3-pro-image" || len(req.FallbackLogicalModelIds) != 1 ||
-		req.DispatchIdempotencyKey != "k1" || req.ActionCode != "" || req.ContentsJson != "" || req.Prompt != "a fox on the moon" {
+	// No model ID and no crew_kind field: the gateway resolves the operation
+	// from the RPC method, and crew_kind rides in metadata_json.
+	if req.TenantId != "t1" || req.GetGcid() != "g1" || req.AgentId != "qgen_renderer" ||
+		req.GetSurface() != "qgen" || req.GetModel() != "" ||
+		req.ResponseModality != gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE ||
+		req.GetDispatchIdempotencyKey() != "k1" || req.GetActionCode() != "" ||
+		len(req.GetMessages()) != 1 || req.GetMessages()[0].GetContent()[0].GetText().GetText() != "a fox on the moon" {
 		t.Fatalf("request not stamped: %+v", req)
 	}
+	var meta map[string]any
+	if err := json.Unmarshal(req.GetMetadataJson(), &meta); err != nil || meta["crew_kind"] != "qgen" {
+		t.Fatalf("crew_kind metadata: %s (err %v)", req.GetMetadataJson(), err)
+	}
 	// Defaults apply when the request carries no tenant/gcid.
-	rpc.answers = append(rpc.answers, func() (*mgv1.InvokeResponse, error) { return &mgv1.InvokeResponse{ImageBytes: []byte{9}}, nil })
+	rpc.answers = append(rpc.answers, func() (*gatewayv1.InvokeResponse, error) {
+		return &gatewayv1.InvokeResponse{Output: []*gatewayv1.OutputItem{{
+			Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+				Part: &gatewayv1.ContentPart_Image{Image: &gatewayv1.ImagePart{
+					Source: &gatewayv1.ImagePart_Data{Data: "CQ=="}, // base64 of {9}
+				}},
+			}},
+		}}}, nil
+	})
 	res, err = inv.Invoke(context.Background(), ImageRequest{Prompt: "p"})
-	if err != nil || res.MimeType != "image/png" || rpc.reqs[1].TenantId != "t-default" || rpc.reqs[1].Gcid != "g-default" {
+	if err != nil || res.MimeType != "image/png" || rpc.reqs[1].TenantId != "t-default" || rpc.reqs[1].GetGcid() != "g-default" {
 		t.Fatalf("defaults: res=%+v err=%v req=%+v", res, err, rpc.reqs[1])
 	}
 }
 
 func TestImageInvoker_retriesThrottlingNotContentOrArguments(t *testing.T) {
-	throttled := func() (*mgv1.InvokeResponse, error) {
+	throttled := func() (*gatewayv1.InvokeResponse, error) {
 		return nil, status.Error(codes.Unavailable, "invoke vendor_error: gemini: HTTP 429")
 	}
-	ok := func() (*mgv1.InvokeResponse, error) { return &mgv1.InvokeResponse{ImageBytes: []byte{1}}, nil }
-	rpc := &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){throttled, throttled, ok}}
+	ok := func() (*gatewayv1.InvokeResponse, error) {
+		return &gatewayv1.InvokeResponse{Output: []*gatewayv1.OutputItem{{
+			Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+				Part: &gatewayv1.ContentPart_Image{Image: &gatewayv1.ImagePart{
+					Source: &gatewayv1.ImagePart_Data{Data: "AQ=="}, // base64 of {1}
+				}},
+			}},
+		}}}, nil
+	}
+	rpc := &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){throttled, throttled, ok}}
 	res, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"})
 	if err != nil || res.Attempts != 3 || len(rpc.reqs) != 3 {
 		t.Fatalf("throttling must be retried: res=%+v err=%v calls=%d", res, err, len(rpc.reqs))
 	}
 	// Budget exhausted: the LAST error surfaces.
-	rpc = &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){throttled, throttled, throttled}}
+	rpc = &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){throttled, throttled, throttled}}
 	if _, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"}); err == nil || status.Code(err) != codes.Unavailable || len(rpc.reqs) != 3 {
 		t.Fatalf("exhausted budget: err=%v calls=%d", err, len(rpc.reqs))
 	}
 	// A malformed request is not retried.
-	rpc = &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){
-		func() (*mgv1.InvokeResponse, error) { return nil, status.Error(codes.InvalidArgument, "bad prompt") }, ok}}
+	rpc = &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
+		func() (*gatewayv1.InvokeResponse, error) {
+			return nil, status.Error(codes.InvalidArgument, "bad prompt")
+		}, ok}}
 	if _, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"}); err == nil || status.Code(err) != codes.InvalidArgument || len(rpc.reqs) != 1 {
 		t.Fatalf("invalid argument must fail fast: err=%v calls=%d", err, len(rpc.reqs))
 	}
 	// No image bytes is a content decision: ErrNoImage, not retried.
-	rpc = &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){
-		func() (*mgv1.InvokeResponse, error) { return &mgv1.InvokeResponse{FinishDetail: "SAFETY"}, nil }, ok}}
-	if _, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"}); !errors.Is(err, ErrNoImage) || !strings.Contains(err.Error(), "SAFETY") || len(rpc.reqs) != 1 {
+	rpc = &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
+		func() (*gatewayv1.InvokeResponse, error) {
+			return &gatewayv1.InvokeResponse{
+				FinishReason:    gatewayv1.FinishReason_FINISH_REASON_CONTENT_FILTER,
+				RawFinishReason: proto.String("SAFETY"),
+				Output:          []*gatewayv1.OutputItem{textOutput("content filtered")},
+			}, nil
+		}, ok}}
+	if _, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"}); !errors.Is(err, ErrNoImage) || !strings.Contains(err.Error(), "content filtered") || len(rpc.reqs) != 1 {
 		t.Fatalf("no image: err=%v calls=%d", err, len(rpc.reqs))
 	}
 	// An empty prompt is refused before the wire.
@@ -100,28 +144,39 @@ func TestImageInvoker_retriesThrottlingNotContentOrArguments(t *testing.T) {
 }
 
 func TestImageInvoker_editCarriesTheSourceImageInline(t *testing.T) {
-	rpc := &scriptedImageRPC{answers: []func() (*mgv1.InvokeResponse, error){
-		func() (*mgv1.InvokeResponse, error) {
-			return &mgv1.InvokeResponse{ImageBytes: []byte{1}, ImageMimeType: "image/jpeg"}, nil
+	rpc := &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
+		func() (*gatewayv1.InvokeResponse, error) {
+			return &gatewayv1.InvokeResponse{Output: []*gatewayv1.OutputItem{{
+				Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+					Part: &gatewayv1.ContentPart_Image{Image: &gatewayv1.ImagePart{
+						Source:    &gatewayv1.ImagePart_Data{Data: "AQ=="}, // base64 of {1}
+						MediaType: "image/jpeg",
+					}},
+				}},
+			}}}, nil
 		}}}
 	res, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "make it night", SourceImage: []byte("PNGDATA"), SourceMime: "image/png"})
 	if err != nil || res.MimeType != "image/jpeg" {
 		t.Fatal(err)
 	}
-	var contents []map[string]any
-	if err := json.Unmarshal([]byte(rpc.reqs[0].ContentsJson), &contents); err != nil || len(contents) != 1 {
-		t.Fatalf("contents_json: %v %s", err, rpc.reqs[0].ContentsJson)
+	// The canonical shape carries the source image as an image part beside
+	// the text, not as genai JSON in contents_json.
+	msg := rpc.reqs[0].GetMessages()
+	if len(msg) != 1 {
+		t.Fatalf("messages: %d", len(msg))
 	}
-	parts := contents[0]["parts"].([]any)
-	if len(parts) != 2 || parts[0].(map[string]any)["text"] != "make it night" {
+	parts := msg[0].GetContent()
+	if len(parts) != 2 || parts[0].GetText().GetText() != "make it night" {
 		t.Fatalf("parts: %v", parts)
 	}
-	inline := parts[1].(map[string]any)["inlineData"].(map[string]any)
-	if inline["mimeType"] != "image/png" || inline["data"] != "UE5HREFUQQ==" {
-		t.Fatalf("inlineData: %v", inline)
+	img := parts[1].GetImage()
+	if img.GetMediaType() != "image/png" || img.GetData() != "UE5HREFUQQ==" {
+		t.Fatalf("image part: %v", img)
 	}
-	if rpc.reqs[0].Prompt != "make it night" {
-		t.Fatal("the text prompt must still be set beside contents_json")
+	// The text prompt rides in the same message as the image part now, not in
+	// a separate prompt field.
+	if got := msg[0].GetContent()[0].GetText().GetText(); got != "make it night" {
+		t.Fatalf("text beside the image part: got %q", got)
 	}
 }
 
