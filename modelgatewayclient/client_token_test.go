@@ -19,31 +19,27 @@ import (
 	"testing"
 
 	"google.golang.org/genai"
-	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/proto"
 
-	mgv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1"
+	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 
 	adkmodel "google.golang.org/adk/model"
 )
 
 // respWithUsage returns a scripted InvokeResponse carrying a candidate JSON
 // completion + a populated TokenUsage block.
-func respWithUsage(completion string, in, out, cached int64) *mgv1.InvokeResponse {
-	return &mgv1.InvokeResponse{
+func respWithUsage(completion string, in, out, cached int64) *gatewayv1.InvokeResponse {
+	return &gatewayv1.InvokeResponse{
 		InvocationId: "01h0000000000000000000000a",
-		Completion:   completion,
-		Usage: &mgv1.TokenUsage{
-			InputTokens:  in,
-			OutputTokens: out,
-			CachedTokens: cached,
-			CostMicros:   4242,
+		UpstreamModel: "gemini-3.1-pro-preview",
+		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
+		Output:        []*gatewayv1.OutputItem{textOutput(completion)},
+		Usage: &gatewayv1.Usage{
+			InputTokens:  proto.Int32(int32(in)),
+			OutputTokens: proto.Int32(int32(out)),
+			CachedTokens: proto.Int32(int32(cached)),
 		},
-		Vendor:         "vertex_ai_gemini",
-		ModelVersion:   "gemini-3.1-pro-preview",
-		LatencyMs:      77,
-		FinishDetail:   "STOP",
-		GatewayVersion: "test-0.0.1",
-		CompletedAt:    timestamppb.Now(),
+		EstimatedCost: proto.Float64(42.42),
 	}
 }
 
@@ -99,17 +95,17 @@ func TestGenerateContent_SurfacesUsageCustomMetadata(t *testing.T) {
 	fake := &fakeServer{resp: respWithUsage(candidate, 100, 50, 0)}
 	resp := runOnce(t, fake)
 
-	if got := resp.CustomMetadata["chora.gateway.input_tokens"]; got != int64(100) {
-		t.Errorf("input_tokens metadata: got %v (%T), want int64(100)", got, got)
+	if got := resp.CustomMetadata["chora.gateway.input_tokens"]; got != int32(100) {
+		t.Errorf("input_tokens metadata: got %v (%T), want int32(100)", got, got)
 	}
-	if got := resp.CustomMetadata["chora.gateway.output_tokens"]; got != int64(50) {
-		t.Errorf("output_tokens metadata: got %v (%T), want int64(50)", got, got)
+	if got := resp.CustomMetadata["chora.gateway.output_tokens"]; got != int32(50) {
+		t.Errorf("output_tokens metadata: got %v (%T), want int32(50)", got, got)
 	}
-	if got := resp.CustomMetadata["chora.gateway.tokens_consumed_total"]; got != int64(150) {
-		t.Errorf("tokens_consumed_total metadata: got %v (%T), want int64(150)", got, got)
+	if got := resp.CustomMetadata["chora.gateway.tokens_consumed_total"]; got != int32(150) {
+		t.Errorf("tokens_consumed_total metadata: got %v (%T), want int32(150)", got, got)
 	}
-	if got := resp.CustomMetadata["chora.gateway.cost_micros"]; got != int64(4242) {
-		t.Errorf("cost_micros metadata: got %v (%T), want int64(4242)", got, got)
+	if got := resp.CustomMetadata["chora.gateway.estimated_cost"]; got != float64(42.42) {
+		t.Errorf("estimated_cost metadata: got %v (%T), want float64(42.42)", got, got)
 	}
 }
 
@@ -239,15 +235,12 @@ func TestGenerateContent_NonJSONCompletionPassesThroughVerbatim(t *testing.T) {
 func TestGenerateContent_NilUsageLeavesCompletionUnchanged(t *testing.T) {
 	t.Parallel()
 	candidate := `{"candidate":{"stem":"Q?","question_type":"mcq"}}`
-	fake := &fakeServer{resp: &mgv1.InvokeResponse{
-		InvocationId: "01h0000000000000000000000a",
-		Completion:   candidate,
+	fake := &fakeServer{resp: &gatewayv1.InvokeResponse{
+		InvocationId:  "01h0000000000000000000000a",
+		UpstreamModel: "gemini-3.1-pro-preview",
+		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
+		Output:        []*gatewayv1.OutputItem{textOutput(candidate)},
 		// Usage deliberately nil.
-		Vendor:         "vertex_ai_gemini",
-		ModelVersion:   "gemini-3.1-pro-preview",
-		FinishDetail:   "STOP",
-		GatewayVersion: "test-0.0.1",
-		CompletedAt:    timestamppb.Now(),
 	}}
 	resp := runOnce(t, fake)
 

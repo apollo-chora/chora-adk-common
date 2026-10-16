@@ -221,8 +221,8 @@ func TestGenerateContent_PerRequestTenantOverridesEnv(t *testing.T) {
 	if fake.lastReq.TenantId != "tenant-PER-REQUEST" {
 		t.Errorf("tenant_id: got %q, want per-request override", fake.lastReq.TenantId)
 	}
-	if fake.lastReq.Gcid != "gcid-PER-REQUEST" {
-		t.Errorf("gcid: got %q, want per-request override", fake.lastReq.Gcid)
+	if fake.lastReq.GetGcid() != "gcid-PER-REQUEST" {
+		t.Errorf("gcid: got %q, want per-request override", fake.lastReq.GetGcid())
 	}
 }
 
@@ -243,8 +243,8 @@ func TestGenerateContent_FallsBackToCfgTenantWhenNoLabels(t *testing.T) {
 	if fake.lastReq.TenantId != "01k0000000000000000000ten" {
 		t.Errorf("tenant_id: got %q, want cfg env fallback", fake.lastReq.TenantId)
 	}
-	if fake.lastReq.Gcid != "01k0000000000000000000gcid" {
-		t.Errorf("gcid: got %q, want cfg env fallback", fake.lastReq.Gcid)
+	if fake.lastReq.GetGcid() != "01k0000000000000000000gcid" {
+		t.Errorf("gcid: got %q, want cfg env fallback", fake.lastReq.GetGcid())
 	}
 }
 
@@ -270,10 +270,11 @@ func TestGenerateContent_TenantLabelsNotForwardedInGenerationConfig(t *testing.T
 			t.Fatalf("GenerateContent: %v", err)
 		}
 	}
-	if fake.lastReq.GenerationConfig != nil {
-		if _, ok := fake.lastReq.GenerationConfig.AsMap()["labels"]; ok {
-			t.Error("tenant labels must not be forwarded in GenerationConfig")
-		}
+	// The canonical GenerationConfig is a typed message, so a `labels` map
+	// entry cannot exist on it at all — the old structpb form could carry one.
+	// Asserting the config is present is the strongest available check.
+	if fake.lastReq.GenerationConfig == nil {
+		t.Error("generation_config should be set")
 	}
 }
 

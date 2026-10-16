@@ -56,16 +56,16 @@ import (
 	"time"
 
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
-	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/oauth2"
 	"google.golang.org/genai"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/credentials/oauth"
-	"google.golang.org/protobuf/types/known/structpb"
+	"google.golang.org/protobuf/proto"
 
-	mgv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1"
+	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 
 	adkmodel "google.golang.org/adk/model"
 )
@@ -196,7 +196,7 @@ func New(ctx context.Context, cfg Config) (adkmodel.LLM, error) {
 	return &client{
 		cfg:  cfg,
 		conn: conn,
-		grpc: mgv1.NewModelGatewayServiceClient(conn),
+		grpc: gatewayv1.NewModelGatewayServiceClient(conn),
 	}, nil
 }
 
@@ -268,7 +268,7 @@ func (s staticTokenSource) Token() (*oauth2.Token, error) {
 type client struct {
 	cfg  Config
 	conn *grpc.ClientConn
-	grpc mgv1.ModelGatewayServiceClient
+	grpc gatewayv1.ModelGatewayServiceClient
 }
 
 // Name — implements adkmodel.LLM. Returns the logical model ID; the actual
@@ -321,11 +321,6 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			yield(nil, fmt.Errorf("modelgatewayclient: marshal contents: %w", err))
 			return
 		}
-		toolsJSON, err := marshalTools(req.Config)
-		if err != nil {
-			yield(nil, fmt.Errorf("modelgatewayclient: marshal tools: %w", err))
-			return
-		}
 
 		if prompt == "" && contentsJSON == "" {
 			yield(nil, errors.New("modelgatewayclient: no user content in LLMRequest"))
@@ -374,44 +369,41 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			}
 		}
 
-		invokeReq := &mgv1.InvokeRequest{
-			TenantId:                tenantID,
-			Gcid:                    gcid,
-			AgentId:                 c.cfg.AgentID,
-			CrewKind:                c.cfg.CrewKind,
-			LogicalModelId:          logicalModel,
-			FallbackLogicalModelIds: c.cfg.FallbackModelIDs,
-			Prompt:                  prompt,
-			SystemPrompt:            sysPrompt,
-			GenerationConfig:        genCfg,
-			ContentsJson:            contentsJSON,
-			ToolsJson:               toolsJSON,
-			ActionCode:              actionCode,
+		invokeReq := &gatewayv1.InvokeRequest{
+			InvocationId: uuid.Must(uuid.NewV7()).String(),
+			TenantId:     tenantID,
+			Gcid:         proto.String(gcid),
+			AgentId:      c.cfg.AgentID,
+			// No model ID: the gateway resolves the operation from the RPC
+			// method and serves it from the text operation's own configured
+			// routes, so the caller's LogicalModelID and FallbackModelIDs are
+			// inert. They stay on Config so the nine services that construct
+			// this client keep compiling.
+			SystemInstruction: sysPrompt,
+			Messages:          contentsToMessages(req.Contents, prompt),
+			GenerationConfig:  genCfg,
+			Tools:             toolsToDefinitions(req.Config),
+			ActionCode:        proto.String(actionCode),
 			// ADR-254 D7: the crew id on every Invoke (the gateway's
 			// suspension read and the surface gate key on it), and the
 			// dispatch idempotency key (R22) the tenant-propagation plugin
 			// copied from session state, so a redelivered dispatch is a
 			// keyed debit claim at the gateway and bills once. Empty on a
 			// non-dispatched call, which the gateway treats as no claim.
-			Surface:                c.cfg.Surface,
-			DispatchIdempotencyKey: dispatchKeyFromLabels(req),
+			Surface:                proto.String(c.cfg.Surface),
+			DispatchIdempotencyKey: proto.String(dispatchKeyFromLabels(req)),
+			MetadataJson:           mustJSON(map[string]string{"crew_kind": c.cfg.CrewKind}),
 		}
 		// W3C trace context propagation — source from the ACTIVE OTel span
 		// (ADK instruments the agent invocation), NOT inbound gRPC metadata.
 		// An ADK agent making an LLM call has no inbound gRPC metadata, so the
 		// previous metadata.FromIncomingContext read always produced empty
-		// values and left the gateway's Invoke span an uncorrelated root. The
-		// otelgrpc client handler already injects the same context into gRPC
-		// metadata; setting the explicit proto field keeps that channel correct
-		// too.
-		if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-			invokeReq.Traceparent = fmt.Sprintf("00-%s-%s-%02x", sc.TraceID(), sc.SpanID(), byte(sc.TraceFlags()))
-			if tsv := sc.TraceState().String(); tsv != "" {
-				invokeReq.Tracestate = tsv
-			}
-		}
-
-		callCtx, cancel := context.WithTimeout(ctx, c.cfg.CallTimeout)
+		// values and left the gateway's Invoke span an uncorrelated root.
+		//
+		// The Invoke RPC has no traceparent or tracestate field, so the context
+		// travels as gRPC metadata — which is where the OTel interceptor reads
+		// it, and where the gateway's continue_trace builds its carrier.
+		callCtx, cancel := context.WithTimeout(withTraceContext(ctx, ctx), c.cfg.CallTimeout)
 		defer cancel()
 
 		resp, err := c.grpc.Invoke(callCtx, invokeReq)
@@ -442,14 +434,16 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 		// terminal JSON carried tokens_consumed_total=0 and the per-hop split
 		// was unavailable.
 		usage := resp.GetUsage()
-		completion := mergeTokensIntoCompletion(resp.GetCompletion(), usage)
+		completion := mergeTokensIntoCompletion(answerText(resp), usage)
 
+		// The Go contract reported a vendor, a fallback chain, a latency and a
+		// gateway version; the canonical response reports the upstream model
+		// and a fallback flag instead. Nothing downstream read the four that
+		// have no equivalent, so they are not carried across.
 		custom := map[string]any{
-			"chora.gateway.invocation_id":   resp.GetInvocationId(),
-			"chora.gateway.vendor":          resp.GetVendor(),
-			"chora.gateway.fallback_chain":  stringSliceToAny(resp.GetFallbackChain()),
-			"chora.gateway.latency_ms":      resp.GetLatencyMs(),
-			"chora.gateway.gateway_version": resp.GetGatewayVersion(),
+			"chora.gateway.invocation_id": resp.GetInvocationId(),
+			"chora.gateway.upstream_model": resp.GetUpstreamModel(),
+			"chora.gateway.fallback_used":  resp.GetFallbackUsed(),
 		}
 		var usageMeta *genai.GenerateContentResponseUsageMetadata
 		if usage != nil {
@@ -457,7 +451,7 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			custom["chora.gateway.input_tokens"] = in
 			custom["chora.gateway.output_tokens"] = out
 			custom["chora.gateway.tokens_consumed_total"] = in + out
-			custom["chora.gateway.cost_micros"] = usage.GetCostMicros()
+			custom["chora.gateway.estimated_cost"] = resp.GetEstimatedCost()
 			usageMeta = &genai.GenerateContentResponseUsageMetadata{
 				PromptTokenCount:        int32(in),
 				CandidatesTokenCount:    int32(out),
@@ -471,7 +465,7 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 		// so the ADK runtime executes the local functiontool handlers and
 		// continues the loop (the gateway is single-turn; the AGENT owns the
 		// loop). Falls back to a single text part for a terminal text turn.
-		parts, err := buildResponseParts(completion, resp.GetToolCallsJson())
+		parts, err := buildResponseParts(completion, outputToolCalls(resp))
 		if err != nil {
 			yield(nil, fmt.Errorf("modelgatewayclient: parse tool_calls: %w", err))
 			return
@@ -482,8 +476,8 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 				Role:  "model",
 				Parts: parts,
 			},
-			ModelVersion:   resp.GetModelVersion(),
-			FinishReason:   mapFinishDetail(resp.GetFinishDetail()),
+			ModelVersion:   resp.GetUpstreamModel(),
+			FinishReason:   mapFinishReason(resp.GetFinishReason(), resp.GetRawFinishReason()),
 			UsageMetadata:  usageMeta,
 			CustomMetadata: custom,
 			TurnComplete:   true,
@@ -687,40 +681,24 @@ func appendBlock(buf, add string) string {
 // We use structpb.NewStruct over a map of the supported fields — the
 // gateway tolerates unknown fields (per JSON-via-Struct round-trip) and
 // applies the ones it knows.
-func encodeGenerationConfig(cfg *genai.GenerateContentConfig) (*structpb.Struct, error) {
+func encodeGenerationConfig(cfg *genai.GenerateContentConfig) (*gatewayv1.GenerationConfig, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	m := map[string]any{}
+	out := &gatewayv1.GenerationConfig{}
 	if cfg.Temperature != nil {
-		m["temperature"] = float64(*cfg.Temperature)
+		out.Temperature = proto.Float64(float64(*cfg.Temperature))
 	}
 	if cfg.TopP != nil {
-		m["top_p"] = float64(*cfg.TopP)
-	}
-	if cfg.TopK != nil {
-		m["top_k"] = float64(*cfg.TopK)
+		out.TopP = proto.Float64(float64(*cfg.TopP))
 	}
 	if cfg.MaxOutputTokens != 0 {
-		m["max_output_tokens"] = float64(cfg.MaxOutputTokens)
-	}
-	if cfg.CandidateCount != 0 {
-		m["candidate_count"] = float64(cfg.CandidateCount)
-	}
-	if cfg.ResponseMIMEType != "" {
-		m["response_mime_type"] = cfg.ResponseMIMEType
+		out.MaxOutputTokens = proto.Int32(cfg.MaxOutputTokens)
 	}
 	if len(cfg.StopSequences) > 0 {
-		ss := make([]any, len(cfg.StopSequences))
-		for i, s := range cfg.StopSequences {
-			ss[i] = s
-		}
-		m["stop_sequences"] = ss
+		out.StopSequences = append([]string(nil), cfg.StopSequences...)
 	}
-	if len(m) == 0 {
-		return nil, nil
-	}
-	return structpb.NewStruct(m)
+	return out, nil
 }
 
 // mapFinishDetail translates the gateway's free-form finish_detail string
@@ -798,7 +776,7 @@ func stringSliceToAny(ss []string) []any {
 //
 // tokens_consumed_total = input + output (matches the gateway's TokenUsage
 // semantics + the orchestrator's existing total-only field).
-func mergeTokensIntoCompletion(completion string, usage *mgv1.TokenUsage) string {
+func mergeTokensIntoCompletion(completion string, usage *gatewayv1.Usage) string {
 	if usage == nil {
 		return completion
 	}
@@ -817,7 +795,7 @@ func mergeTokensIntoCompletion(completion string, usage *mgv1.TokenUsage) string
 		return completion
 	}
 	in, out := usage.GetInputTokens(), usage.GetOutputTokens()
-	stampTokens(obj, in, out)
+	stampTokens(obj, int64(in), int64(out))
 	// The generation agent wraps its candidate under a "candidate" key
 	// ({"candidate": {...}}); the Python executor's _map_response UNWRAPS that
 	// (raw = raw["candidate"]) BEFORE reading tokens_consumed_total. So the
@@ -826,7 +804,7 @@ func mergeTokensIntoCompletion(completion string, usage *mgv1.TokenUsage) string
 	// already-flat candidate) has no wrapper — stamping the top level alone is
 	// enough there. Stamp BOTH so either Python shape reads the counts.
 	if inner, ok := obj["candidate"].(map[string]any); ok {
-		stampTokens(inner, in, out)
+		stampTokens(inner, int64(in), int64(out))
 	}
 
 	merged, err := json.Marshal(obj)

@@ -10,12 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/trace"
+	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	mgv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1"
+	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 )
 
 // ResponseModalityImage is the InvokeRequest.response_modality value that
@@ -48,7 +49,7 @@ func DefaultImageRetryPolicy() ImageRetryPolicy {
 // imageRPC is the slice of the gateway stub the invoker uses (a test injects
 // a fake; production passes the generated client).
 type imageRPC interface {
-	Invoke(ctx context.Context, in *mgv1.InvokeRequest, opts ...grpc.CallOption) (*mgv1.InvokeResponse, error)
+	Invoke(ctx context.Context, in *gatewayv1.InvokeRequest, opts ...grpc.CallOption) (*gatewayv1.InvokeResponse, error)
 }
 
 // ImageInvoker calls ModelGatewayService/Invoke with response_modality=IMAGE
@@ -79,7 +80,7 @@ func NewImageInvoker(ctx context.Context, cfg Config, retry ImageRetryPolicy) (*
 	if err != nil {
 		return nil, err
 	}
-	return newImageInvokerWith(cfg, mgv1.NewModelGatewayServiceClient(conn), conn, retry), nil
+	return newImageInvokerWith(cfg, gatewayv1.NewModelGatewayServiceClient(conn), conn, retry), nil
 }
 
 func newImageInvokerWith(cfg Config, rpc imageRPC, conn *grpc.ClientConn, retry ImageRetryPolicy) *ImageInvoker {
@@ -152,51 +153,41 @@ func (i *ImageInvoker) Invoke(ctx context.Context, req ImageRequest) (ImageResul
 	if g := strings.TrimSpace(req.GCID); g != "" {
 		gcid = g
 	}
-	contentsJSON := ""
-	if len(req.SourceImage) > 0 {
-		contentsJSON = inlineImageContentsJSON(req.Prompt, req.SourceImage, req.SourceMime)
+	invokeReq := &gatewayv1.InvokeRequest{
+		InvocationId: uuid.Must(uuid.NewV7()).String(),
+		TenantId:     tenantID,
+		Gcid:         proto.String(gcid),
+		AgentId:      i.cfg.AgentID,
+		// No model ID: the gateway resolves the operation from the RPC method.
+		Messages: imageMessages(req),
+		ResponseModality:    gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE,
+		ActionCode:          proto.String(req.ActionCode),
+		Surface:             proto.String(i.cfg.Surface),
+		DispatchIdempotencyKey: proto.String(req.DispatchIdempotencyKey),
+		MetadataJson:           mustJSON(map[string]string{"crew_kind": i.cfg.CrewKind}),
 	}
-	invokeReq := &mgv1.InvokeRequest{
-		TenantId:                tenantID,
-		Gcid:                    gcid,
-		AgentId:                 i.cfg.AgentID,
-		CrewKind:                i.cfg.CrewKind,
-		LogicalModelId:          i.cfg.LogicalModelID,
-		FallbackLogicalModelIds: i.cfg.FallbackModelIDs,
-		Prompt:                  req.Prompt,
-		ResponseModality:        ResponseModalityImage,
-		ContentsJson:            contentsJSON,
-		ActionCode:              req.ActionCode,
-		Surface:                 i.cfg.Surface,
-		DispatchIdempotencyKey:  req.DispatchIdempotencyKey,
-	}
-	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
-		invokeReq.Traceparent = fmt.Sprintf("00-%s-%s-%02x", sc.TraceID(), sc.SpanID(), byte(sc.TraceFlags()))
-		if tsv := sc.TraceState().String(); tsv != "" {
-			invokeReq.Tracestate = tsv
-		}
-	}
+	// The Invoke RPC has no traceparent field; the context travels as gRPC
+	// metadata, which is where the gateway's continue_trace reads it.
+	callCtx0 := withTraceContext(ctx, ctx)
 	var lastErr error
 	for attempt := 1; attempt <= i.retry.Attempts; attempt++ {
-		callCtx, cancel := context.WithTimeout(ctx, i.cfg.CallTimeout)
+		callCtx, cancel := context.WithTimeout(callCtx0, i.cfg.CallTimeout)
 		resp, err := i.grpc.Invoke(callCtx, invokeReq)
 		cancel()
 		if err == nil {
-			if len(resp.GetImageBytes()) == 0 {
-				detail := resp.GetFinishDetail()
-				if detail == "" {
-					detail = resp.GetCompletion()
-				}
+			// The canonical response carries the image as an image part in
+			// the output items, not as a top-level byte field.
+			data, mime, detail := imageFromResponse(resp)
+			if len(data) == 0 {
 				if len(detail) > 200 {
 					detail = detail[:200]
 				}
 				return ImageResult{Attempts: attempt}, fmt.Errorf("%w (detail=%q)", ErrNoImage, detail)
 			}
-			mime := resp.GetImageMimeType()
 			if mime == "" {
 				mime = "image/png"
 			}
-			return ImageResult{Bytes: resp.GetImageBytes(), MimeType: mime, ModelVersion: resp.GetModelVersion(), Attempts: attempt}, nil
+			return ImageResult{Bytes: data, MimeType: mime, ModelVersion: resp.GetUpstreamModel(), Attempts: attempt}, nil
 		}
 		lastErr = err
 		if !isRetryableImageErr(err) || attempt == i.retry.Attempts {

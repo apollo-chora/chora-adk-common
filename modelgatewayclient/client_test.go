@@ -20,24 +20,32 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/test/bufconn"
 	"google.golang.org/protobuf/types/known/structpb"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
-	mgv1 "github.com/apollo-chora/chora-contracts/gen/go/chora/services/model_gateway/v1"
+	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 
 	adkmodel "google.golang.org/adk/model"
 )
 
 // fakeServer captures inbound InvokeRequests + emits a scripted response.
 type fakeServer struct {
-	mgv1.UnimplementedModelGatewayServiceServer
+	gatewayv1.UnimplementedModelGatewayServiceServer
 
-	lastReq *mgv1.InvokeRequest
+	lastReq *gatewayv1.InvokeRequest
 	lastMD  metadata.MD
-	resp    *mgv1.InvokeResponse
+	resp    *gatewayv1.InvokeResponse
 	err     error
 }
 
-func (f *fakeServer) Invoke(ctx context.Context, in *mgv1.InvokeRequest) (*mgv1.InvokeResponse, error) {
+// textOutput wraps a text answer in the canonical output-item shape.
+func textOutput(text string) *gatewayv1.OutputItem {
+	return &gatewayv1.OutputItem{
+		Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+			Part: &gatewayv1.ContentPart_Text{Text: &gatewayv1.TextPart{Text: text}},
+		}},
+	}
+}
+
+func (f *fakeServer) Invoke(ctx context.Context, in *gatewayv1.InvokeRequest) (*gatewayv1.InvokeResponse, error) {
 	f.lastReq = in
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
 		f.lastMD = md
@@ -48,15 +56,12 @@ func (f *fakeServer) Invoke(ctx context.Context, in *mgv1.InvokeRequest) (*mgv1.
 	if f.resp != nil {
 		return f.resp, nil
 	}
-	return &mgv1.InvokeResponse{
-		InvocationId:   "01h0000000000000000000000a",
-		Completion:     "B (443) — HTTPS canonical port.",
-		Vendor:         "vertex_gemini",
-		ModelVersion:   "gemini-2.5-pro",
-		LatencyMs:      1234,
-		FinishDetail:   "STOP",
-		GatewayVersion: "test-0.0.1",
-		CompletedAt:    timestamppb.Now(),
+	return &gatewayv1.InvokeResponse{
+		InvocationId:    "01h0000000000000000000000a",
+		UpstreamModel:   "gemini-2.5-pro",
+		FinishReason:    gatewayv1.FinishReason_FINISH_REASON_STOP,
+		AttemptCount:    1,
+		Output:          []*gatewayv1.OutputItem{textOutput("B (443) — HTTPS canonical port.")},
 	}, nil
 }
 
@@ -67,7 +72,7 @@ func startFakeServer(t *testing.T, fake *fakeServer) (grpc.DialOption, func()) {
 	t.Helper()
 	lis := bufconn.Listen(1 << 20)
 	srv := grpc.NewServer()
-	mgv1.RegisterModelGatewayServiceServer(srv, fake)
+	gatewayv1.RegisterModelGatewayServiceServer(srv, fake)
 	go func() { _ = srv.Serve(lis) }()
 	dialer := func(context.Context, string) (net.Conn, error) {
 		return lis.Dial()
@@ -151,11 +156,8 @@ func TestGenerateContent_PropagatesActiveSpanTraceparent(t *testing.T) {
 	if !contains(tps[0], "0af7651916cd43dd8448eb211c80319c") {
 		t.Errorf("metadata traceparent %q does not carry the active trace id", tps[0])
 	}
-	// (b) The proto Traceparent field also carries the active-span trace id
-	//     (explicit channel, sourced from the span — NOT inbound metadata).
-	if !contains(fake.lastReq.Traceparent, "0af7651916cd43dd8448eb211c80319c") {
-		t.Errorf("proto Traceparent %q does not carry the active trace id", fake.lastReq.Traceparent)
-	}
+	// (b) The Invoke RPC has no traceparent field at all, so gRPC metadata is
+	//     the only channel the context has. Nothing to assert on the request.
 }
 
 // ---------------------------------------------------------------------------
@@ -294,34 +296,36 @@ func TestGenerateContent_HappyPath(t *testing.T) {
 	if got.TenantId != "01k0000000000000000000ten" {
 		t.Errorf("tenant_id: got %q", got.TenantId)
 	}
-	if got.Gcid != "01k0000000000000000000gcid" {
-		t.Errorf("gcid: got %q", got.Gcid)
+	if got.GetGcid() != "01k0000000000000000000gcid" {
+		t.Errorf("gcid: got %q", got.GetGcid())
 	}
 	if got.AgentId != "qgen_question" {
 		t.Errorf("agent_id: got %q", got.AgentId)
 	}
-	if got.LogicalModelId != "gemini-2.5-flash" { // per-call override wins
-		t.Errorf("logical_model_id: got %q, want gemini-2.5-flash (per-call override)", got.LogicalModelId)
+	// The gateway resolves the operation from the RPC method, so the caller
+	// sends no model id — the per-call override and the configured default are
+	// both inert.
+	if got.GetModel() != "" {
+		t.Errorf("model: got %q, want empty", got.GetModel())
 	}
-	if got.Prompt != "What is the HTTPS port?" {
-		t.Errorf("prompt: got %q", got.Prompt)
+	// The prompt is a user message now, not a request field.
+	if len(got.GetMessages()) != 1 {
+		t.Fatalf("messages: got %d, want 1", len(got.GetMessages()))
 	}
-	if got.SystemPrompt != "You are an MCQ generator." {
-		t.Errorf("system_prompt: got %q", got.SystemPrompt)
+	if prompt := got.GetMessages()[0].GetContent()[0].GetText().GetText(); prompt != "What is the HTTPS port?" {
+		t.Errorf("prompt: got %q", prompt)
+	}
+	if got.GetSystemInstruction() != "You are an MCQ generator." {
+		t.Errorf("system_instruction: got %q", got.GetSystemInstruction())
 	}
 	if got.GenerationConfig == nil {
-		t.Error("generation_config should be set")
-	} else {
-		m := got.GenerationConfig.AsMap()
-		// float32 → float64 round-trip via structpb (JSON-Number) preserves
-		// the IEEE-754 representation of float32(0.3), which is not exactly
-		// 0.3. Allow a small tolerance.
-		if got := m["temperature"].(float64); math.Abs(got-0.3) > 1e-5 {
-			t.Errorf("temperature: got %v, want ~0.3", got)
-		}
-		if m["max_output_tokens"].(float64) != 256 {
-			t.Errorf("max_output_tokens: got %v", m["max_output_tokens"])
-		}
+		t.Fatal("generation_config should be set")
+	}
+	if got := got.GenerationConfig.GetTemperature(); math.Abs(got-0.3) > 1e-5 {
+		t.Errorf("temperature: got %v, want ~0.3", got)
+	}
+	if got.GenerationConfig.GetMaxOutputTokens() != 256 {
+		t.Errorf("max_output_tokens: got %v", got.GenerationConfig.GetMaxOutputTokens())
 	}
 
 	// Verify LLMResponse translation.
@@ -344,8 +348,8 @@ func TestGenerateContent_HappyPath(t *testing.T) {
 	if !resp.TurnComplete {
 		t.Error("TurnComplete should be true for unary")
 	}
-	if resp.CustomMetadata["chora.gateway.vendor"] != "vertex_gemini" {
-		t.Errorf("vendor metadata: got %v", resp.CustomMetadata["chora.gateway.vendor"])
+	if resp.CustomMetadata["chora.gateway.upstream_model"] != "gemini-2.5-pro" {
+		t.Errorf("upstream_model metadata: got %v", resp.CustomMetadata["chora.gateway.upstream_model"])
 	}
 }
 
@@ -391,8 +395,8 @@ func TestGenerateContent_SystemInstructionFromConfig(t *testing.T) {
 	if got == nil {
 		t.Fatal("server did not receive an InvokeRequest")
 	}
-	if got.SystemPrompt != instructionText {
-		t.Errorf("system_prompt: got %q, want %q (Config.SystemInstruction must propagate)", got.SystemPrompt, instructionText)
+	if got.GetSystemInstruction() != instructionText {
+		t.Errorf("system_instruction: got %q, want %q (Config.SystemInstruction must propagate)", got.GetSystemInstruction(), instructionText)
 	}
 }
 
@@ -426,7 +430,7 @@ func TestGenerateContent_SystemInstruction_MergesWithContentsSystem(t *testing.T
 	}
 
 	want := configInstr + "\n\n" + contentsInstr
-	if got := fake.lastReq.SystemPrompt; got != want {
+	if got := fake.lastReq.GetSystemInstruction(); got != want {
 		t.Errorf("system_prompt: got %q, want %q", got, want)
 	}
 }
@@ -443,16 +447,12 @@ func TestGenerateContent_SystemInstruction_MergesWithContentsSystem(t *testing.T
 
 func TestGenerateContent_CustomMetadata_StructpbSerialisable(t *testing.T) {
 	t.Parallel()
-	fake := &fakeServer{resp: &mgv1.InvokeResponse{
+	fake := &fakeServer{resp: &gatewayv1.InvokeResponse{
 		InvocationId:   "01h0000000000000000000000a",
-		Completion:     "ok",
-		Vendor:         "vertex_ai_gemini",
-		ModelVersion:   "gemini-2.5-flash",
-		FallbackChain:  []string{"vertex_ai_gemini:gemini-2.5-pro", "vertex_ai_gemini:gemini-2.5-flash"},
-		LatencyMs:      42,
-		FinishDetail:   "STOP",
-		GatewayVersion: "test-0.0.1",
-		CompletedAt:    timestamppb.Now(),
+		UpstreamModel: "gemini-2.5-flash",
+		FallbackUsed:  true,
+		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
+		Output:        []*gatewayv1.OutputItem{textOutput("ok")},
 	}}
 	llm := mustNewClient(t, fake, nil)
 
@@ -477,15 +477,15 @@ func TestGenerateContent_CustomMetadata_StructpbSerialisable(t *testing.T) {
 		t.Fatalf("CustomMetadata not structpb-serializable: %v\nmap = %#v", err, resp.CustomMetadata)
 	}
 
-	// fallback_chain MUST be []any with both vendor:model entries preserved
-	// in order so downstream cost-attribution dashboards keep the dispatch
-	// trail.
-	got, ok := resp.CustomMetadata["chora.gateway.fallback_chain"].([]any)
+	// The canonical response reports a fallback FLAG, not the chain the Go
+	// contract reported. The flag must be structpb-serialisable and true when
+	// the gateway says a fallback served the call.
+	got, ok := resp.CustomMetadata["chora.gateway.fallback_used"].(bool)
 	if !ok {
-		t.Fatalf("fallback_chain wrong type: got %T, want []any", resp.CustomMetadata["chora.gateway.fallback_chain"])
+		t.Fatalf("fallback_used wrong type: got %T, want bool", resp.CustomMetadata["chora.gateway.fallback_used"])
 	}
-	if len(got) != 2 || got[0] != "vertex_ai_gemini:gemini-2.5-pro" || got[1] != "vertex_ai_gemini:gemini-2.5-flash" {
-		t.Errorf("fallback_chain: got %v, want [pro, flash]", got)
+	if !got {
+		t.Errorf("fallback_used: got %v, want true", got)
 	}
 }
 
@@ -511,12 +511,12 @@ func TestGenerateContent_CustomMetadata_EmptyFallbackChain(t *testing.T) {
 	if _, err := structpb.NewValue(resp.CustomMetadata); err != nil {
 		t.Fatalf("CustomMetadata not structpb-serializable on empty fallback chain: %v", err)
 	}
-	got, ok := resp.CustomMetadata["chora.gateway.fallback_chain"].([]any)
+	got, ok := resp.CustomMetadata["chora.gateway.fallback_used"].(bool)
 	if !ok {
-		t.Fatalf("fallback_chain wrong type: got %T, want []any", resp.CustomMetadata["chora.gateway.fallback_chain"])
+		t.Fatalf("fallback_used wrong type: got %T, want bool", resp.CustomMetadata["chora.gateway.fallback_used"])
 	}
-	if len(got) != 0 {
-		t.Errorf("fallback_chain on happy-path should be empty []any, got %v", got)
+	if got {
+		t.Errorf("fallback_used on the happy path: got %v, want false", got)
 	}
 }
 
@@ -643,7 +643,7 @@ func TestGenerateContent_StampsSurfaceOnEveryInvoke(t *testing.T) {
 				t.Fatalf("%s: %v", name, err)
 			}
 		}
-		if fake.lastReq == nil || fake.lastReq.Surface != "qgen" {
+		if fake.lastReq == nil || fake.lastReq.GetSurface() != "qgen" {
 			t.Errorf("%s: InvokeRequest.surface = %q, want %q (crew id)", name, fake.lastReq.GetSurface(), "qgen")
 		}
 	}
