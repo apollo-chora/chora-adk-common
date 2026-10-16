@@ -8,8 +8,6 @@ github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op h1:1BOWQJweNyvZMl
 github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
 github.com/apollo-chora/chora-common v0.0.0-20261005042719-5373c91ce52b h1:NMi/J6xMGyO1jIg3OJcW5Ry3XN3dogIg4q4MHE8EqzM=
 github.com/apollo-chora/chora-common v0.0.0-20261005042719-5373c91ce52b/go.mod h1:CnZuv/TABgvd6qn9jhlLNZLk9yCfMR0XcBffSsvMMiw=
-github.com/apollo-chora/chora-contracts/gen/go v0.0.0-20261005030823-832afca4af5b h1:DBeGN2Ym7gKu7aRa2PpcRbKe4s5zlBKdr+/3ryxAW2A=
-github.com/apollo-chora/chora-contracts/gen/go v0.0.0-20261005030823-832afca4af5b/go.mod h1:lP49emmpeh7Uw4NQ4sEavelSbScuJ2q49bScmnuemWY=
 github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1xcsSM=
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
