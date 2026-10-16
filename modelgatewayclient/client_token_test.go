@@ -30,7 +30,7 @@ import (
 // completion + a populated TokenUsage block.
 func respWithUsage(completion string, in, out, cached int64) *gatewayv1.InvokeResponse {
 	return &gatewayv1.InvokeResponse{
-		InvocationId: "01h0000000000000000000000a",
+		InvocationId:  "01h0000000000000000000000a",
 		UpstreamModel: "gemini-3.1-pro-preview",
 		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
 		Output:        []*gatewayv1.OutputItem{textOutput(completion)},

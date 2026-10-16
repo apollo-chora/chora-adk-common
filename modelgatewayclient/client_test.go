@@ -57,11 +57,11 @@ func (f *fakeServer) Invoke(ctx context.Context, in *gatewayv1.InvokeRequest) (*
 		return f.resp, nil
 	}
 	return &gatewayv1.InvokeResponse{
-		InvocationId:    "01h0000000000000000000000a",
-		UpstreamModel:   "gemini-2.5-pro",
-		FinishReason:    gatewayv1.FinishReason_FINISH_REASON_STOP,
-		AttemptCount:    1,
-		Output:          []*gatewayv1.OutputItem{textOutput("B (443) — HTTPS canonical port.")},
+		InvocationId:  "01h0000000000000000000000a",
+		UpstreamModel: "gemini-2.5-pro",
+		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,
+		AttemptCount:  1,
+		Output:        []*gatewayv1.OutputItem{textOutput("B (443) — HTTPS canonical port.")},
 	}, nil
 }
 
@@ -448,7 +448,7 @@ func TestGenerateContent_SystemInstruction_MergesWithContentsSystem(t *testing.T
 func TestGenerateContent_CustomMetadata_StructpbSerialisable(t *testing.T) {
 	t.Parallel()
 	fake := &fakeServer{resp: &gatewayv1.InvokeResponse{
-		InvocationId:   "01h0000000000000000000000a",
+		InvocationId:  "01h0000000000000000000000a",
 		UpstreamModel: "gemini-2.5-flash",
 		FallbackUsed:  true,
 		FinishReason:  gatewayv1.FinishReason_FINISH_REASON_STOP,

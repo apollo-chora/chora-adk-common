@@ -55,10 +55,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"golang.org/x/oauth2"
 	"google.golang.org/genai"
-	"github.com/google/uuid"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -380,10 +380,10 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			// inert. They stay on Config so the nine services that construct
 			// this client keep compiling.
 			SystemInstruction: sysPrompt,
-			Messages:          contentsToMessages(req.Contents, prompt),
-			GenerationConfig:  genCfg,
-			Tools:             toolsToDefinitions(req.Config),
-			ActionCode:        proto.String(actionCode),
+
+			GenerationConfig: genCfg,
+			Tools:            toolsToDefinitions(req.Config),
+			ActionCode:       proto.String(actionCode),
 			// ADR-254 D7: the crew id on every Invoke (the gateway's
 			// suspension read and the surface gate key on it), and the
 			// dispatch idempotency key (R22) the tenant-propagation plugin
@@ -405,6 +405,13 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 		// it, and where the gateway's continue_trace builds its carrier.
 		callCtx, cancel := context.WithTimeout(withTraceContext(ctx, ctx), c.cfg.CallTimeout)
 		defer cancel()
+
+		messages, err := contentsToMessages(req.Contents, prompt)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		invokeReq.Messages = messages
 
 		resp, err := c.grpc.Invoke(callCtx, invokeReq)
 		if err != nil {
@@ -434,14 +441,19 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 		// terminal JSON carried tokens_consumed_total=0 and the per-hop split
 		// was unavailable.
 		usage := resp.GetUsage()
-		completion := mergeTokensIntoCompletion(answerText(resp), usage)
+		answer, err := answerText(resp)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		completion := mergeTokensIntoCompletion(answer, usage)
 
 		// The Go contract reported a vendor, a fallback chain, a latency and a
 		// gateway version; the canonical response reports the upstream model
 		// and a fallback flag instead. Nothing downstream read the four that
 		// have no equivalent, so they are not carried across.
 		custom := map[string]any{
-			"chora.gateway.invocation_id": resp.GetInvocationId(),
+			"chora.gateway.invocation_id":  resp.GetInvocationId(),
 			"chora.gateway.upstream_model": resp.GetUpstreamModel(),
 			"chora.gateway.fallback_used":  resp.GetFallbackUsed(),
 		}
@@ -465,7 +477,12 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 		// so the ADK runtime executes the local functiontool handlers and
 		// continues the loop (the gateway is single-turn; the AGENT owns the
 		// loop). Falls back to a single text part for a terminal text turn.
-		parts, err := buildResponseParts(completion, outputToolCalls(resp))
+		toolCalls, err := outputToolCalls(resp)
+		if err != nil {
+			yield(nil, err)
+			return
+		}
+		parts, err := buildResponseParts(completion, toolCalls)
 		if err != nil {
 			yield(nil, fmt.Errorf("modelgatewayclient: parse tool_calls: %w", err))
 			return
@@ -697,6 +714,17 @@ func encodeGenerationConfig(cfg *genai.GenerateContentConfig) (*gatewayv1.Genera
 	}
 	if len(cfg.StopSequences) > 0 {
 		out.StopSequences = append([]string(nil), cfg.StopSequences...)
+	}
+	// The canonical GenerationConfig has no field for these. Dropping them
+	// silently changes what the model is asked for, so they are refused.
+	if cfg.TopK != nil {
+		return nil, fmt.Errorf("modelgatewayclient: top_k is not carried by the canonical generation config")
+	}
+	if cfg.CandidateCount != 0 {
+		return nil, fmt.Errorf("modelgatewayclient: candidate_count is not carried by the canonical generation config")
+	}
+	if cfg.ResponseMIMEType != "" {
+		return nil, fmt.Errorf("modelgatewayclient: response_mime_type is not carried by the canonical generation config")
 	}
 	return out, nil
 }

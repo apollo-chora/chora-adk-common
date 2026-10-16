@@ -27,9 +27,9 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/genai"
 	"google.golang.org/grpc/metadata"
-	"go.opentelemetry.io/otel/trace"
 
 	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 )
@@ -42,12 +42,12 @@ import (
 // sent. When the conversation is structured (multi-turn, or carrying function
 // calls or responses) each genai Content becomes one canonical Message, so no
 // turn is flattened away.
-func contentsToMessages(contents []*genai.Content, prompt string) []*gatewayv1.Message {
+func contentsToMessages(contents []*genai.Content, prompt string) ([]*gatewayv1.Message, error) {
 	if len(contents) == 0 {
 		if prompt == "" {
-			return nil
+			return nil, nil
 		}
-		return []*gatewayv1.Message{userMessage(prompt)}
+		return []*gatewayv1.Message{userMessage(prompt)}, nil
 	}
 
 	out := make([]*gatewayv1.Message, 0, len(contents))
@@ -85,8 +85,10 @@ func contentsToMessages(contents []*genai.Content, prompt string) []*gatewayv1.M
 				msg.Content = append(msg.Content, textPart(string(mustJSON(p.FunctionResponse.Response))))
 			default:
 				// InlineData and FileData have no canonical part. Refuse rather
-				// than drop: a dropped blob is a silently truncated turn.
-				continue
+				// than drop: a dropped blob is a silently truncated turn, and
+				// the caller must not be able to mistake the refusal for a
+				// text-only transcript.
+				return nil, fmt.Errorf("modelgatewayclient: content part %T has no canonical representation", p)
 			}
 		}
 		if len(msg.Content) == 0 && len(msg.ToolCalls) == 0 {
@@ -94,10 +96,15 @@ func contentsToMessages(contents []*genai.Content, prompt string) []*gatewayv1.M
 		}
 		out = append(out, msg)
 	}
-	if len(out) == 0 && prompt != "" {
-		return []*gatewayv1.Message{userMessage(prompt)}
+	if len(out) == 0 {
+		if prompt == "" {
+			return nil, fmt.Errorf("modelgatewayclient: conversation carried no transcribable content")
+		}
+		// Every structured entry was a system part, so the flat prompt is the
+		// whole user turn. This is the flat path, not a lossy fallback.
+		return []*gatewayv1.Message{userMessage(prompt)}, nil
 	}
-	return out
+	return out, nil
 }
 
 func userMessage(text string) *gatewayv1.Message {
@@ -208,11 +215,11 @@ func mustJSON(v any) []byte {
 // Only text parts are an answer. A refusal is the gateway declining, and
 // dropping it silently would let a truncated answer parse as a complete one, so
 // a refusal yields "" and the caller reports the empty completion.
-func answerText(resp *gatewayv1.InvokeResponse) string {
+func answerText(resp *gatewayv1.InvokeResponse) (string, error) {
 	if resp == nil {
-		return ""
+		return "", fmt.Errorf("modelgatewayclient: nil InvokeResponse")
 	}
-	var b strings.Builder
+	var parts []string
 	for _, item := range resp.GetOutput() {
 		part := item.GetContent()
 		if part == nil {
@@ -220,19 +227,22 @@ func answerText(resp *gatewayv1.InvokeResponse) string {
 		}
 		switch {
 		case part.GetText() != nil:
-			b.WriteString(part.GetText().GetText())
+			parts = append(parts, part.GetText().GetText())
 		case part.GetRefusal() != nil:
-			return ""
+			// The gateway declined to answer. Returning an empty string here
+			// would let the caller build an apparently-complete response with
+			// TurnComplete set, disguising a refusal as a blank completion.
+			return "", fmt.Errorf("modelgatewayclient: the model refused: %s", part.GetRefusal().GetText())
 		}
 	}
-	return b.String()
+	return strings.Join(parts, ""), nil
 }
 
 // outputToolCalls returns the model's function calls as canonical JSON, which is
 // the shape buildResponseParts already parses.
-func outputToolCalls(resp *gatewayv1.InvokeResponse) string {
+func outputToolCalls(resp *gatewayv1.InvokeResponse) (string, error) {
 	if resp == nil {
-		return ""
+		return "", nil
 	}
 	var calls []*genai.FunctionCall
 	for _, item := range resp.GetOutput() {
@@ -242,14 +252,19 @@ func outputToolCalls(resp *gatewayv1.InvokeResponse) string {
 		}
 		var args map[string]any
 		if len(tc.GetArgumentsJson()) > 0 {
-			_ = json.Unmarshal(tc.GetArgumentsJson(), &args)
+			if err := json.Unmarshal(tc.GetArgumentsJson(), &args); err != nil {
+				// A tool call whose arguments cannot be parsed must not become a
+				// call with nil arguments: the agent would invoke the tool with
+				// nothing and read the failure as the tool's own.
+				return "", fmt.Errorf("modelgatewayclient: tool call %q has unparseable arguments: %w", tc.GetName(), err)
+			}
 		}
 		calls = append(calls, &genai.FunctionCall{Name: tc.GetName(), Args: args})
 	}
 	if len(calls) == 0 {
-		return ""
+		return "", nil
 	}
-	return string(mustJSON(calls))
+	return string(mustJSON(calls)), nil
 }
 
 // mapFinishReason translates the canonical finish reason onto the genai enum

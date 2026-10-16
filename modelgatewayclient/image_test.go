@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 )
@@ -119,7 +119,9 @@ func TestImageInvoker_retriesThrottlingNotContentOrArguments(t *testing.T) {
 	}
 	// A malformed request is not retried.
 	rpc = &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
-		func() (*gatewayv1.InvokeResponse, error) { return nil, status.Error(codes.InvalidArgument, "bad prompt") }, ok}}
+		func() (*gatewayv1.InvokeResponse, error) {
+			return nil, status.Error(codes.InvalidArgument, "bad prompt")
+		}, ok}}
 	if _, err := newTestInvoker(rpc).Invoke(context.Background(), ImageRequest{Prompt: "p"}); err == nil || status.Code(err) != codes.InvalidArgument || len(rpc.reqs) != 1 {
 		t.Fatalf("invalid argument must fail fast: err=%v calls=%d", err, len(rpc.reqs))
 	}
@@ -171,8 +173,10 @@ func TestImageInvoker_editCarriesTheSourceImageInline(t *testing.T) {
 	if img.GetMediaType() != "image/png" || img.GetData() != "UE5HREFUQQ==" {
 		t.Fatalf("image part: %v", img)
 	}
-	if false {
-		t.Fatal("the text prompt must still be set beside contents_json")
+	// The text prompt rides in the same message as the image part now, not in
+	// a separate prompt field.
+	if got := msg[0].GetContent()[0].GetText().GetText(); got != "make it night" {
+		t.Fatalf("text beside the image part: got %q", got)
 	}
 }
 

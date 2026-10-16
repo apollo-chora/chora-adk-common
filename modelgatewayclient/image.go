@@ -12,9 +12,9 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
 )
@@ -159,10 +159,10 @@ func (i *ImageInvoker) Invoke(ctx context.Context, req ImageRequest) (ImageResul
 		Gcid:         proto.String(gcid),
 		AgentId:      i.cfg.AgentID,
 		// No model ID: the gateway resolves the operation from the RPC method.
-		Messages: imageMessages(req),
-		ResponseModality:    gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE,
-		ActionCode:          proto.String(req.ActionCode),
-		Surface:             proto.String(i.cfg.Surface),
+		Messages:               imageMessages(req),
+		ResponseModality:       gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE,
+		ActionCode:             proto.String(req.ActionCode),
+		Surface:                proto.String(i.cfg.Surface),
 		DispatchIdempotencyKey: proto.String(req.DispatchIdempotencyKey),
 		MetadataJson:           mustJSON(map[string]string{"crew_kind": i.cfg.CrewKind}),
 	}
