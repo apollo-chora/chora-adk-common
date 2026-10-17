@@ -161,10 +161,16 @@ func (i *ImageInvoker) Invoke(ctx context.Context, req ImageRequest) (ImageResul
 		// No model ID: the gateway resolves the operation from the RPC method.
 		Messages:               imageMessages(req),
 		ResponseModality:       gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE,
-		ActionCode:             proto.String(req.ActionCode),
 		Surface:                proto.String(i.cfg.Surface),
 		DispatchIdempotencyKey: proto.String(req.DispatchIdempotencyKey),
 		MetadataJson:           mustJSON(map[string]string{"crew_kind": i.cfg.CrewKind}),
+	}
+	// An empty action_code is left UNSET, not set to "": the gateway refuses
+	// an empty one, and the client's contract is that an unset action_code
+	// disables gateway-side metering for the call (the off-meter render of
+	// ADR-254 D7). The text path draws the same line.
+	if req.ActionCode != "" {
+		invokeReq.ActionCode = proto.String(req.ActionCode)
 	}
 	// The Invoke RPC has no traceparent field; the context travels as gRPC
 	// metadata, which is where the gateway's continue_trace reads it.

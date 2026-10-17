@@ -211,9 +211,16 @@ func dialGateway(ctx context.Context, cfg Config) (*grpc.ClientConn, error) {
 		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	}
 	if cfg.Insecure || (len(cfg.dialOptsExtra) == 0 && envFlag(EnvGatewayInsecure)) {
-		// LOCAL DEV ONLY — plaintext gRPC to a local gateway (no TLS,
-		// no token). Set via CHORA_GATEWAY_INSECURE=1 env var.
+		// LOCAL DEV ONLY — plaintext gRPC to a local gateway. Set via
+		// CHORA_GATEWAY_INSECURE=1 env var. The insecure flag selects the
+		// TRANSPORT (plaintext vs TLS), not whether to authenticate: when a
+		// token is configured it is still presented, via a credential that
+		// permits plaintext. The standard oauth.TokenSource refuses to send
+		// over insecure credentials, so it cannot be reused here.
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if token := strings.TrimSpace(os.Getenv(EnvGatewayToken)); token != "" {
+			dialOpts = append(dialOpts, grpc.WithPerRPCCredentials(plaintextBearerToken{token: token}))
+		}
 	} else if len(cfg.dialOptsExtra) == 0 {
 		token := strings.TrimSpace(os.Getenv(EnvGatewayToken))
 		if token == "" {
@@ -263,6 +270,19 @@ type staticTokenSource struct{ token string }
 func (s staticTokenSource) Token() (*oauth2.Token, error) {
 	return &oauth2.Token{AccessToken: s.token, TokenType: "Bearer"}, nil
 }
+
+// plaintextBearerToken presents a bearer token over an explicitly plaintext
+// connection. RequireTransportSecurity is false so gRPC-Go will send it over
+// insecure credentials (the oauth.TokenSource above refuses). The token is
+// not encrypted, so this is only for CHORA_GATEWAY_INSECURE=1 connections on
+// a trusted local network — never for production TLS.
+type plaintextBearerToken struct{ token string }
+
+func (c plaintextBearerToken) GetRequestMetadata(_ context.Context, _ ...string) (map[string]string, error) {
+	return map[string]string{"authorization": "Bearer " + c.token}, nil
+}
+
+func (plaintextBearerToken) RequireTransportSecurity() bool { return false }
 
 // client is the adkmodel.LLM implementation backed by chora-model-gateway.
 type client struct {
@@ -383,7 +403,7 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 
 			GenerationConfig: genCfg,
 			Tools:            toolsToDefinitions(req.Config),
-			ActionCode:       proto.String(actionCode),
+			ResponseModality: gatewayv1.ResponseModality_RESPONSE_MODALITY_TEXT,
 			// ADR-254 D7: the crew id on every Invoke (the gateway's
 			// suspension read and the surface gate key on it), and the
 			// dispatch idempotency key (R22) the tenant-propagation plugin
@@ -393,6 +413,12 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			Surface:                proto.String(c.cfg.Surface),
 			DispatchIdempotencyKey: proto.String(dispatchKeyFromLabels(req)),
 			MetadataJson:           mustJSON(map[string]string{"crew_kind": c.cfg.CrewKind}),
+		}
+		// An empty action_code is left UNSET, not set to "": the gateway
+		// rejects an empty action_code, and the client's contract is that an
+		// unset action_code disables gateway-side metering for the crew.
+		if actionCode != "" {
+			invokeReq.ActionCode = proto.String(actionCode)
 		}
 		// W3C trace context propagation — source from the ACTIVE OTel span
 		// (ADK instruments the agent invocation), NOT inbound gRPC metadata.
