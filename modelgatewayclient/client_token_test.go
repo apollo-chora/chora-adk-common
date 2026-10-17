@@ -16,9 +16,12 @@ package modelgatewayclient
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"testing"
+	"time"
 
 	"google.golang.org/genai"
+	"google.golang.org/grpc"
 	"google.golang.org/protobuf/proto"
 
 	gatewayv1 "github.com/apollo-chora/chora-adk-common/modelgatewayclient/gatewayv1"
@@ -286,5 +289,98 @@ func TestPlaintextBearerToken_PresentsTokenOverPlaintext(t *testing.T) {
 	}
 	if c.RequireTransportSecurity() {
 		t.Fatal("RequireTransportSecurity = true, want false so the token is sent over plaintext")
+	}
+}
+
+// REGRESSION: end-to-end proof that the plaintext dial branch presents the
+// configured token. The unit test above only exercises the credential object;
+// this drives the real dialGateway insecure branch against a live plaintext
+// gRPC server and asserts the server receives the bearer token — the exact
+// omission that made an authenticating gateway reject every call.
+func TestInsecureDial_PresentsTokenOverPlaintext(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	fake := &fakeServer{}
+	gatewayv1.RegisterModelGatewayServiceServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+
+	t.Setenv(EnvGatewayToken, "test-token-123")
+	t.Setenv(EnvGatewayInsecure, "1")
+
+	llm, err := New(context.Background(), Config{
+		Endpoint:       lis.Addr().String(),
+		Insecure:       true,
+		LogicalModelID: "gemini-2.5-pro",
+		AgentID:        "qgen_question",
+		CrewKind:       "qgen",
+		Surface:        "qgen",
+		TenantID:       "01k0000000000000000000ten",
+		GCID:           "01k0000000000000000000gcid",
+		CallTimeout:    5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "generate"}}}},
+	}
+	for _, err := range llm.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent yielded error: %v", err)
+		}
+	}
+
+	if got := fake.lastMD["authorization"]; len(got) != 1 || got[0] != "Bearer test-token-123" {
+		t.Fatalf("server received authorization = %v, want [Bearer test-token-123]", got)
+	}
+}
+
+// A blank token must NOT be presented: the insecure branch attaches the
+// credential only when a token is configured.
+func TestInsecureDial_BlankTokenNotPresented(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	fake := &fakeServer{}
+	gatewayv1.RegisterModelGatewayServiceServer(srv, fake)
+	go func() { _ = srv.Serve(lis) }()
+	defer srv.Stop()
+
+	t.Setenv(EnvGatewayToken, "")
+	t.Setenv(EnvGatewayInsecure, "1")
+
+	llm, err := New(context.Background(), Config{
+		Endpoint:       lis.Addr().String(),
+		Insecure:       true,
+		LogicalModelID: "gemini-2.5-pro",
+		AgentID:        "qgen_question",
+		CrewKind:       "qgen",
+		Surface:        "qgen",
+		TenantID:       "01k0000000000000000000ten",
+		GCID:           "01k0000000000000000000gcid",
+		CallTimeout:    5 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	req := &adkmodel.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "generate"}}}},
+	}
+	for _, err := range llm.GenerateContent(context.Background(), req, false) {
+		if err != nil {
+			t.Fatalf("GenerateContent yielded error: %v", err)
+		}
+	}
+
+	if got := fake.lastMD["authorization"]; len(got) != 0 {
+		t.Fatalf("server received authorization = %v, want empty (blank token must not be presented)", got)
 	}
 }
