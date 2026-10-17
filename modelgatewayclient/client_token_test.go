@@ -270,3 +270,21 @@ func asInt(v any) int {
 func stripFenceForTest(s string) string {
 	return stripMarkdownFence(s)
 }
+
+// REGRESSION: the plaintext (CHORA_GATEWAY_INSECURE=1) dial branch dropped
+// the caller's configured token, so an authenticating gateway rejected every
+// call with "no API key was presented". The branch must present the token
+// over plaintext via a credential that permits insecure transport.
+func TestPlaintextBearerToken_PresentsTokenOverPlaintext(t *testing.T) {
+	c := plaintextBearerToken{token: "test-token-123"}
+	md, err := c.GetRequestMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("GetRequestMetadata: %v", err)
+	}
+	if got := md["authorization"]; got != "Bearer test-token-123" {
+		t.Fatalf("authorization = %q, want %q", got, "Bearer test-token-123")
+	}
+	if c.RequireTransportSecurity() {
+		t.Fatal("RequireTransportSecurity = true, want false so the token is sent over plaintext")
+	}
+}
