@@ -404,7 +404,6 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			GenerationConfig: genCfg,
 			Tools:            toolsToDefinitions(req.Config),
 			ResponseModality: gatewayv1.ResponseModality_RESPONSE_MODALITY_TEXT,
-			ActionCode:       proto.String(actionCode),
 			// ADR-254 D7: the crew id on every Invoke (the gateway's
 			// suspension read and the surface gate key on it), and the
 			// dispatch idempotency key (R22) the tenant-propagation plugin
@@ -414,6 +413,12 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 			Surface:                proto.String(c.cfg.Surface),
 			DispatchIdempotencyKey: proto.String(dispatchKeyFromLabels(req)),
 			MetadataJson:           mustJSON(map[string]string{"crew_kind": c.cfg.CrewKind}),
+		}
+		// An empty action_code is left UNSET, not set to "": the gateway
+		// rejects an empty action_code, and the client's contract is that an
+		// unset action_code disables gateway-side metering for the crew.
+		if actionCode != "" {
+			invokeReq.ActionCode = proto.String(actionCode)
 		}
 		// W3C trace context propagation — source from the ACTIVE OTel span
 		// (ADK instruments the agent invocation), NOT inbound gRPC metadata.
