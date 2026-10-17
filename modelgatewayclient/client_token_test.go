@@ -338,6 +338,9 @@ func TestInsecureDial_PresentsTokenOverPlaintext(t *testing.T) {
 	if got := fake.lastMD["authorization"]; len(got) != 1 || got[0] != "Bearer test-token-123" {
 		t.Fatalf("server received authorization = %v, want [Bearer test-token-123]", got)
 	}
+	if got := fake.lastReq.ResponseModality; got != gatewayv1.ResponseModality_RESPONSE_MODALITY_TEXT {
+		t.Fatalf("response_modality = %v, want TEXT (the gateway rejects UNSPECIFIED)", got)
+	}
 }
 
 // A blank token must NOT be presented: the insecure branch attaches the
