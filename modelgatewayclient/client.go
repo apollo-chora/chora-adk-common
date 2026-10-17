@@ -403,6 +403,7 @@ func (c *client) GenerateContent(ctx context.Context, req *adkmodel.LLMRequest, 
 
 			GenerationConfig: genCfg,
 			Tools:            toolsToDefinitions(req.Config),
+			ResponseModality: gatewayv1.ResponseModality_RESPONSE_MODALITY_TEXT,
 			ActionCode:       proto.String(actionCode),
 			// ADR-254 D7: the crew id on every Invoke (the gateway's
 			// suspension read and the surface gate key on it), and the
