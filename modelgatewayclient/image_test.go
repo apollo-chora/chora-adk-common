@@ -71,6 +71,9 @@ func TestImageInvoker_stampsIdentityAndReturnsBytes(t *testing.T) {
 		req.GetSurface() != "qgen" || req.GetModel() != "" ||
 		req.ResponseModality != gatewayv1.ResponseModality_RESPONSE_MODALITY_IMAGE ||
 		req.GetDispatchIdempotencyKey() != "k1" || req.GetActionCode() != "" ||
+		// The gateway refuses an empty action_code, so an empty one must be
+		// ABSENT on the wire rather than present and empty.
+		req.ProtoReflect().Has(req.ProtoReflect().Descriptor().Fields().ByName("action_code")) ||
 		len(req.GetMessages()) != 1 || req.GetMessages()[0].GetContent()[0].GetText().GetText() != "a fox on the moon" {
 		t.Fatalf("request not stamped: %+v", req)
 	}
@@ -191,5 +194,28 @@ func TestNewImageInvoker_guardsTheConfig(t *testing.T) {
 	}
 	if !isRetryableImageErr(status.Error(codes.ResourceExhausted, "x")) || isRetryableImageErr(status.Error(codes.PermissionDenied, "x")) || isRetryableImageErr(nil) {
 		t.Fatal("retry classification wrong")
+	}
+}
+
+// An action code the crew configured rides the wire as a present field, so a
+// metered image call is still metered; only the empty one is left absent.
+func TestImageInvokeStampActionCodeWhenConfigured(t *testing.T) {
+	rpc := &scriptedImageRPC{answers: []func() (*gatewayv1.InvokeResponse, error){
+		func() (*gatewayv1.InvokeResponse, error) {
+			return &gatewayv1.InvokeResponse{Output: []*gatewayv1.OutputItem{{
+				Item: &gatewayv1.OutputItem_Content{Content: &gatewayv1.ContentPart{
+					Part: &gatewayv1.ContentPart_Image{Image: &gatewayv1.ImagePart{
+						Source: &gatewayv1.ImagePart_Data{Data: "CQ=="},
+					}},
+				}},
+			}}}, nil
+		},
+	}}
+	inv := newTestInvoker(rpc)
+	if _, err := inv.Invoke(context.Background(), ImageRequest{Prompt: "a fox", ActionCode: "image_render"}); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if got := rpc.reqs[0].GetActionCode(); got != "image_render" {
+		t.Fatalf("action_code = %q, want image_render", got)
 	}
 }
