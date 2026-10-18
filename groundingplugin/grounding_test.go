@@ -2,6 +2,7 @@ package groundingplugin
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	adkmodel "google.golang.org/adk/model"
@@ -19,51 +20,122 @@ type errState struct{}
 
 func (errState) Get(string) (any, error) { return nil, errors.New("state unavailable") }
 
-func TestApplyGrounding_InjectsFileDataPart(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Generate MCQs."}}}},
-	}
-	state := fakeState{
-		"source_blob_uri":  "gs://b/job/material.pdf",
-		"source_mime_type": "application/pdf",
-	}
-
-	applyGroundingFromState(state, req)
-
-	parts := req.Contents[0].Parts
-	if len(parts) != 2 {
-		t.Fatalf("parts = %d; want 2 (text + fileData)", len(parts))
-	}
-	fd := parts[1].FileData
-	if fd == nil {
-		t.Fatal("fileData part not injected")
-	}
-	if fd.FileURI != "gs://b/job/material.pdf" || fd.MIMEType != "application/pdf" {
-		t.Errorf("fileData = {%q, %q}; want gs://b/job/material.pdf application/pdf", fd.FileURI, fd.MIMEType)
+func userReq(text string) *adkmodel.LLMRequest {
+	return &adkmodel.LLMRequest{
+		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: text}}}},
 	}
 }
 
-func TestApplyGrounding_NoBlobIsNoOp(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "x"}}}},
+func TestApplyGrounding_InjectsTextPart(t *testing.T) {
+	req := userReq("Generate MCQs.")
+	state := fakeState{"source_material_text": `<SOURCE file="paper.pdf" page="1">Photosynthesis.</SOURCE>`}
+
+	if err := applyGroundingFromState(state, req); err != nil {
+		t.Fatalf("applyGroundingFromState: %v", err)
 	}
-	applyGroundingFromState(fakeState{}, req) // no source_blob_uri
+
+	parts := req.Contents[0].Parts
+	if len(parts) != 2 {
+		t.Fatalf("parts = %d; want 2 (instruction + grounding text)", len(parts))
+	}
+	if parts[1].FileData != nil {
+		t.Fatalf("FileData injected; the gateway cannot carry it")
+	}
+	if !strings.Contains(parts[1].Text, "Photosynthesis.") {
+		t.Errorf("grounding text = %q; want the material preserved", parts[1].Text)
+	}
+	if !strings.HasPrefix(parts[1].Text, "\n\n") {
+		t.Error("grounding text should be separated from the author's instruction")
+	}
+}
+
+// The whole point of this package's change: no part may ever be a blob
+// reference, even when the state still declares files.
+func TestApplyGrounding_NeverEmitsFileData(t *testing.T) {
+	req := userReq("Generate MCQs.")
+	state := fakeState{
+		"source_files_json": `[{"blob_uri":"s3://b/job/source","mime_type":"application/pdf","role":"source"},` +
+			`{"blob_uri":"s3://b/job/rubric","mime_type":"text/markdown","role":"rubric"}]`,
+		"source_blob_uri":      "s3://b/job/source",
+		"source_mime_type":     "application/pdf",
+		"source_material_text": "rendered material",
+		"grounding_mode":       "starting_point",
+	}
+
+	if err := applyGroundingFromState(state, req); err != nil {
+		t.Fatalf("applyGroundingFromState: %v", err)
+	}
+	for i, p := range req.Contents[0].Parts {
+		if p.FileData != nil || p.InlineData != nil {
+			t.Fatalf("part %d is a blob (%+v); the canonical gateway contract cannot carry it", i, p)
+		}
+	}
+}
+
+// Declaring material but supplying none must FAIL, not quietly generate
+// ungrounded questions the author believes came from their document.
+func TestApplyGrounding_DeclaredFileListWithoutTextFails(t *testing.T) {
+	req := userReq("Generate MCQs.")
+	state := fakeState{
+		"source_files_json": `[{"blob_uri":"s3://b/job/source","mime_type":"application/pdf","role":"source"}]`,
+	}
+
+	err := applyGroundingFromState(state, req)
+	if !errors.Is(err, ErrNoSourceMaterialText) {
+		t.Fatalf("err = %v; want ErrNoSourceMaterialText", err)
+	}
 	if len(req.Contents[0].Parts) != 1 {
-		t.Errorf("no-op expected for empty source_blob_uri; parts = %d, want 1", len(req.Contents[0].Parts))
+		t.Errorf("parts = %d; want the request untouched on failure", len(req.Contents[0].Parts))
+	}
+}
+
+func TestApplyGrounding_SingleBlobWithoutTextFails(t *testing.T) {
+	req := userReq("Generate MCQs.")
+	state := fakeState{
+		"source_blob_uri":  "s3://b/job/source",
+		"source_mime_type": "image/png",
+	}
+
+	// An image-only upload has no text layer by design — it cannot be
+	// text-grounded, so it fails truthfully rather than inventing questions.
+	if err := applyGroundingFromState(state, req); !errors.Is(err, ErrNoSourceMaterialText) {
+		t.Fatalf("err = %v; want ErrNoSourceMaterialText", err)
+	}
+}
+
+func TestApplyGrounding_NoMaterialIsNoOp(t *testing.T) {
+	req := userReq("x")
+	if err := applyGroundingFromState(fakeState{}, req); err != nil {
+		t.Fatalf("err = %v; want nil for a job with no material", err)
+	}
+	if len(req.Contents[0].Parts) != 1 {
+		t.Errorf("no-op expected; parts = %d, want 1", len(req.Contents[0].Parts))
+	}
+}
+
+func TestApplyGrounding_WhitespaceTextIsAbsent(t *testing.T) {
+	req := userReq("x")
+	if err := applyGroundingFromState(fakeState{"source_material_text": "   \n\t "}, req); err != nil {
+		t.Fatalf("err = %v; want nil (whitespace is not material)", err)
+	}
+	if len(req.Contents[0].Parts) != 1 {
+		t.Errorf("no-op expected; parts = %d, want 1", len(req.Contents[0].Parts))
 	}
 }
 
 func TestApplyGrounding_NoUserContentAppendsFresh(t *testing.T) {
 	req := &adkmodel.LLMRequest{Contents: nil}
-	state := fakeState{"source_blob_uri": "gs://b/m.png", "source_mime_type": "image/png"}
+	state := fakeState{"source_material_text": "material"}
 
-	applyGroundingFromState(state, req)
+	if err := applyGroundingFromState(state, req); err != nil {
+		t.Fatalf("applyGroundingFromState: %v", err)
+	}
 
 	if len(req.Contents) != 1 || req.Contents[0].Role != "user" {
 		t.Fatalf("expected a fresh user content; got %+v", req.Contents)
 	}
-	if req.Contents[0].Parts[0].FileData == nil {
-		t.Error("fresh content missing fileData part")
+	if !strings.Contains(req.Contents[0].Parts[0].Text, "material") {
+		t.Error("fresh content missing the grounding text")
 	}
 }
 
@@ -75,54 +147,60 @@ func TestApplyGrounding_PrefersLastUserContent(t *testing.T) {
 			{Role: "user", Parts: []*genai.Part{{Text: "newest"}}},
 		},
 	}
-	applyGroundingFromState(fakeState{"source_blob_uri": "gs://b/m.pdf"}, req)
+	if err := applyGroundingFromState(fakeState{"source_material_text": "material"}, req); err != nil {
+		t.Fatalf("applyGroundingFromState: %v", err)
+	}
 
-	// The blob rides with the NEWEST user turn, not the older one or the model turn.
+	// The material rides with the NEWEST user turn, not the older one or the model turn.
 	if n := len(req.Contents[2].Parts); n != 2 {
 		t.Fatalf("newest user content parts = %d; want 2", n)
 	}
-	if req.Contents[0].Parts[len(req.Contents[0].Parts)-1].FileData != nil {
-		t.Error("fileData wrongly attached to the older user turn")
+	if n := len(req.Contents[0].Parts); n != 1 {
+		t.Errorf("older user turn parts = %d; want 1", n)
 	}
-	if req.Contents[1].Parts[len(req.Contents[1].Parts)-1].FileData != nil {
-		t.Error("fileData wrongly attached to the model turn")
+	if n := len(req.Contents[1].Parts); n != 1 {
+		t.Errorf("model turn parts = %d; want 1", n)
 	}
 }
 
 func TestApplyGrounding_NilReqSafe(t *testing.T) {
-	// Must not panic.
-	applyGroundingFromState(fakeState{"source_blob_uri": "gs://x"}, nil)
+	if err := applyGroundingFromState(fakeState{"source_material_text": "m"}, nil); err != nil {
+		t.Fatalf("err = %v; want nil on a nil request", err)
+	}
 }
 
 func TestApplyGrounding_StateErrorIsNoOp(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "x"}}}},
+	req := userReq("x")
+	// Get errors → readState "" → no material declared → no-op, not a refusal.
+	if err := applyGroundingFromState(errState{}, req); err != nil {
+		t.Fatalf("err = %v; want nil", err)
 	}
-	applyGroundingFromState(errState{}, req) // Get errors → readState "" → no-op
 	if len(req.Contents[0].Parts) != 1 {
 		t.Errorf("state-error must be a no-op; parts = %d, want 1", len(req.Contents[0].Parts))
 	}
 }
 
-func TestApplyGrounding_NonStringBlobIsNoOp(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "x"}}}},
+func TestApplyGrounding_NonStringTextIsNoOp(t *testing.T) {
+	req := userReq("x")
+	if err := applyGroundingFromState(fakeState{"source_material_text": 123}, req); err != nil {
+		t.Fatalf("err = %v; want nil", err)
 	}
-	applyGroundingFromState(fakeState{"source_blob_uri": 123}, req) // non-string → "" → no-op
 	if len(req.Contents[0].Parts) != 1 {
-		t.Errorf("non-string blob must be a no-op; parts = %d, want 1", len(req.Contents[0].Parts))
+		t.Errorf("non-string text must be a no-op; parts = %d, want 1", len(req.Contents[0].Parts))
 	}
 }
 
 func TestApplyGrounding_SkipsNilContent(t *testing.T) {
 	// A nil entry at the TAIL must be skipped (the loop scans from the end), not
-	// panic; the blob lands on the preceding real user content.
+	// panic; the text lands on the preceding real user content.
 	req := &adkmodel.LLMRequest{
 		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "x"}}}, nil},
 	}
-	applyGroundingFromState(fakeState{"source_blob_uri": "gs://b/m.pdf"}, req)
+	if err := applyGroundingFromState(fakeState{"source_material_text": "material"}, req); err != nil {
+		t.Fatalf("applyGroundingFromState: %v", err)
+	}
 	if len(req.Contents[0].Parts) != 2 {
-		t.Errorf("blob should land on the real user content; parts = %d, want 2", len(req.Contents[0].Parts))
+		t.Errorf("text should land on the real user content; parts = %d, want 2", len(req.Contents[0].Parts))
 	}
 }
 
@@ -133,46 +211,5 @@ func TestNew_BuildsPlugin(t *testing.T) {
 	}
 	if p == nil {
 		t.Fatal("New returned nil plugin")
-	}
-}
-
-func TestApplyGrounding_AttachesEveryEntryOfTheMultiFileList(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Generate MCQs."}}}},
-	}
-	state := fakeState{
-		"source_files_json": `[{"blob_uri":"s3://b/job/source","mime_type":"application/pdf","role":"source"},` +
-			`{"blob_uri":"s3://b/job/rubric","mime_type":"text/markdown","role":"rubric"}]`,
-	}
-
-	applyGroundingFromState(state, req)
-
-	parts := req.Contents[0].Parts
-	if len(parts) != 3 {
-		t.Fatalf("parts = %d; want 3 (text + 2 fileData)", len(parts))
-	}
-	if got := parts[1].FileData.FileURI; got != "s3://b/job/source" {
-		t.Errorf("first file = %q; want s3://b/job/source", got)
-	}
-	if got := parts[2].FileData.FileURI; got != "s3://b/job/rubric" {
-		t.Errorf("second file = %q; want s3://b/job/rubric", got)
-	}
-}
-
-func TestApplyGrounding_MalformedFileListFallsBackToTheSingleBlob(t *testing.T) {
-	req := &adkmodel.LLMRequest{
-		Contents: []*genai.Content{{Role: "user", Parts: []*genai.Part{{Text: "Generate MCQs."}}}},
-	}
-	state := fakeState{
-		"source_files_json": "not json",
-		"source_blob_uri":   "s3://b/job/source",
-		"source_mime_type":  "application/pdf",
-	}
-
-	applyGroundingFromState(state, req)
-
-	parts := req.Contents[0].Parts
-	if len(parts) != 2 || parts[1].FileData == nil || parts[1].FileData.FileURI != "s3://b/job/source" {
-		t.Fatalf("malformed list must fall back to the single blob; parts = %+v", parts)
 	}
 }
